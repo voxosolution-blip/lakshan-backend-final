@@ -22,9 +22,23 @@ This guide will walk you through deploying your backend to Railway step-by-step.
 
 ## Step 2: Configure Project Settings
 
-### 2.1 Set Root Directory
+### 2.1 Fix "Railpack could not determine how to build" Error
 
-Since your backend is in the `backend` folder:
+If you see the error "Railpack could not determine how to build the app", **you have two options**:
+
+#### Option A: Use Configuration Files (RECOMMENDED - Already Done ✅)
+
+The repository now includes:
+- `nixpacks.toml` - Tells Railway how to build from the `backend` folder
+- `railway.json` - Railway-specific configuration
+
+**These files are already pushed to GitHub**, so Railway should automatically detect them on the next deployment. If you still see the error:
+
+1. In Railway dashboard → Go to your service
+2. Click **"Deployments"** tab
+3. Click **"Redeploy"** to trigger a new build with the config files
+
+#### Option B: Set Root Directory in Dashboard
 
 1. Click on your new project in Railway
 2. Click on the service (or create one if not auto-created)
@@ -33,13 +47,13 @@ Since your backend is in the `backend` folder:
 5. Set it to: `backend`
 6. Click **"Save"**
 
-### 2.2 Configure Build Command (Optional)
+### 2.2 Verify Build Configuration
 
-Railway usually auto-detects Node.js projects, but you can verify:
+Railway will use the `nixpacks.toml` configuration, but you can verify:
 
-1. In the same **Settings** tab
-2. Check **"Build Command"** - should be: `npm install` (auto-detected)
-3. Check **"Start Command"** - should be: `npm start` (from Procfile)
+1. In **Settings** tab
+2. **Build Command** should be: `cd backend && npm install` (from nixpacks.toml)
+3. **Start Command** should be: `cd backend && npm start` (from nixpacks.toml)
 
 ---
 
