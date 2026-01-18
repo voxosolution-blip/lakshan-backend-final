@@ -165,8 +165,9 @@ export const createProduction = async (req, res, next) => {
       });
     }
     
-    // Check if batch number function exists BEFORE starting transaction
+    // Check if batch number function and batch column exist BEFORE starting transaction
     let batchFunctionExists = false;
+    let batchColumnExists = false;
     try {
       const funcCheck = await pool.query(`
         SELECT EXISTS (
@@ -175,8 +176,16 @@ export const createProduction = async (req, res, next) => {
         )
       `);
       batchFunctionExists = funcCheck.rows[0].exists;
+      
+      const columnCheck = await pool.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.columns 
+          WHERE table_name = 'productions' AND column_name = 'batch'
+        )
+      `);
+      batchColumnExists = columnCheck.rows[0].exists;
     } catch (checkError) {
-      console.warn('Could not check for generate_batch_number function:', checkError.message);
+      console.warn('Could not check for batch function/column:', checkError.message);
     }
     
     await client.query('BEGIN');
@@ -418,12 +427,22 @@ export const createProduction = async (req, res, next) => {
     
     // Create production record FIRST (before deducting inventory)
     // This ensures milk calculation includes this production
-    const productionResult = await client.query(
-      `INSERT INTO productions (product_id, quantity_produced, date, batch, notes, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [productId, quantity, productionDate, batchNumber, notes || null, userId]
-    );
+    let productionResult;
+    if (batchColumnExists) {
+      productionResult = await client.query(
+        `INSERT INTO productions (product_id, quantity_produced, date, batch, notes, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [productId, quantity, productionDate, batchNumber, notes || null, userId]
+      );
+    } else {
+      productionResult = await client.query(
+        `INSERT INTO productions (product_id, quantity_produced, date, notes, created_by)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [productId, quantity, productionDate, notes || null, userId]
+      );
+    }
     const production = productionResult.rows[0];
     
     // NOW deduct inventory items based on recipe (after production is created)
@@ -503,34 +522,52 @@ export const createProduction = async (req, res, next) => {
       }
     }
     
-    // Create inventory batch record for finished goods
-    await client.query(
-      `INSERT INTO inventory_batches (inventory_item_id, production_id, batch_number, quantity, production_date, status)
-       VALUES ($1, $2, $3, $4, $5, 'available')
-       ON CONFLICT (inventory_item_id, batch_number) DO UPDATE
-       SET quantity = inventory_batches.quantity + EXCLUDED.quantity,
-           status = 'available'`,
-      [finishedGoodsItemId, production.id, batchNumber, quantity, productionDate]
-    );
+    // Create inventory batch record for finished goods (only if table exists)
+    const inventoryBatchesTableExists = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'inventory_batches'
+      )
+    `);
     
-    // Recalculate finished goods inventory quantity from all available batches
-    // This ensures accuracy when there are multiple productions or allocations
-    const totalAvailableResult = await client.query(
-      `SELECT COALESCE(SUM(quantity), 0) as total_available
-       FROM inventory_batches
-       WHERE inventory_item_id = $1 AND status = 'available'`,
-      [finishedGoodsItemId]
-    );
-    
-    const totalAvailable = parseFloat(totalAvailableResult.rows[0].total_available || 0);
-    
-    await client.query(
-      `UPDATE inventory_items 
-       SET quantity = $1,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2`,
-      [totalAvailable, finishedGoodsItemId]
-    );
+    if (inventoryBatchesTableExists.rows[0].exists) {
+      await client.query(
+        `INSERT INTO inventory_batches (inventory_item_id, production_id, batch_number, quantity, production_date, status)
+         VALUES ($1, $2, $3, $4, $5, 'available')
+         ON CONFLICT (inventory_item_id, batch_number) DO UPDATE
+         SET quantity = inventory_batches.quantity + EXCLUDED.quantity,
+             status = 'available'`,
+        [finishedGoodsItemId, production.id, batchNumber, quantity, productionDate]
+      );
+      
+      // Recalculate finished goods inventory quantity from all available batches
+      // This ensures accuracy when there are multiple productions or allocations
+      const totalAvailableResult = await client.query(
+        `SELECT COALESCE(SUM(quantity), 0) as total_available
+         FROM inventory_batches
+         WHERE inventory_item_id = $1 AND status = 'available'`,
+        [finishedGoodsItemId]
+      );
+      
+      const totalAvailable = parseFloat(totalAvailableResult.rows[0].total_available || 0);
+      
+      await client.query(
+        `UPDATE inventory_items 
+         SET quantity = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [totalAvailable, finishedGoodsItemId]
+      );
+    } else {
+      // If inventory_batches table doesn't exist, just update inventory_items quantity directly
+      await client.query(
+        `UPDATE inventory_items 
+         SET quantity = quantity + $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [quantity, finishedGoodsItemId]
+      );
+    }
     
     await client.query('COMMIT');
     
