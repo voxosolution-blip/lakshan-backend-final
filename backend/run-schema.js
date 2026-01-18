@@ -9,9 +9,18 @@ import { dirname, join } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Use DATABASE_PUBLIC_URL if available (for external connections), otherwise DATABASE_URL
+const connectionString = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
+
+if (!connectionString) {
+  console.error('❌ Error: DATABASE_URL or DATABASE_PUBLIC_URL environment variable is not set');
+  console.error('💡 Make sure you are running this via: railway run node backend/run-schema.js');
+  process.exit(1);
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  connectionString: connectionString,
+  ssl: process.env.NODE_ENV === 'production' || process.env.DATABASE_PUBLIC_URL ? { rejectUnauthorized: false } : false,
 });
 
 async function runSchema() {
