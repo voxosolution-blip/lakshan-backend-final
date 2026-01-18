@@ -56,3 +56,4 @@ Once the schema is run successfully:
 3. Use https://www.elephantsql.com/console.html to connect and run SQL
 4. Done! 🎉
 
+

@@ -66,3 +66,4 @@ if (Test-Path "temp-run-schema.js") {
 Write-Host ""
 Write-Host "💡 If that didn't work, try the manual method below:" -ForegroundColor Yellow
 
+

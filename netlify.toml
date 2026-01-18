@@ -1,0 +1,26 @@
+# Netlify Configuration for Backend API
+# Note: Netlify is primarily for frontend/static sites and serverless functions
+# For full backend APIs with databases, Railway is recommended
+
+[build]
+  # Point to backend directory (though Netlify won't build Node.js backends the same way)
+  base = "backend"
+  publish = "backend"
+
+# Netlify Functions (if you want to use Netlify Functions instead)
+# Uncomment if you want to convert to serverless functions
+# [functions]
+#   directory = "backend/netlify/functions"
+
+# Redirects - proxy API requests to a backend server
+# You'd need to set up a backend server URL in your Netlify environment
+[[redirects]]
+  from = "/api/*"
+  to = "https://your-railway-app.up.railway.app/api/:splat"
+  status = 200
+  force = true
+
+# Note: For a full Express backend like this, Railway or similar platforms are better suited
+# This config is mainly to prevent the "frontend directory not found" error
+
+
