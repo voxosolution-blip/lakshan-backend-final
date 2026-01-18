@@ -63,3 +63,4 @@ UPDATE sales SET is_edited = false WHERE is_edited IS NULL;
 SELECT 'Migration completed: Sales reverse and edit tracking columns added' as status;
 
 
+
