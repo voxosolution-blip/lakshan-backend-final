@@ -165,6 +165,20 @@ export const createProduction = async (req, res, next) => {
       });
     }
     
+    // Check if batch number function exists BEFORE starting transaction
+    let batchFunctionExists = false;
+    try {
+      const funcCheck = await pool.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.routines 
+          WHERE routine_name = 'generate_batch_number'
+        )
+      `);
+      batchFunctionExists = funcCheck.rows[0].exists;
+    } catch (checkError) {
+      console.warn('Could not check for generate_batch_number function:', checkError.message);
+    }
+    
     await client.query('BEGIN');
     
     // Get product details
@@ -323,22 +337,39 @@ export const createProduction = async (req, res, next) => {
     // Generate batch number using database function (with explicit type casting)
     // Fallback to manual generation if function doesn't exist
     let batchNumber;
-    try {
-      const batchNumberResult = await client.query(
-        `SELECT generate_batch_number($1::UUID, $2::DATE) as batch_number`,
-        [finishedGoodsItemId, productionDate]
-      );
-      batchNumber = batchNumberResult.rows[0].batch_number;
-    } catch (funcError) {
-      // Fallback: Generate batch number manually if function doesn't exist
-      console.warn('generate_batch_number function not found, using fallback method:', funcError.message);
-      const datePart = productionDate; // Already in YYYY-MM-DD format
+    const datePart = productionDate; // Already in YYYY-MM-DD format
+    
+    if (batchFunctionExists) {
+      try {
+        const batchNumberResult = await client.query(
+          `SELECT generate_batch_number($1::UUID, $2::DATE) as batch_number`,
+          [finishedGoodsItemId, productionDate]
+        );
+        batchNumber = batchNumberResult.rows[0].batch_number;
+      } catch (funcError) {
+        // If function call fails in transaction, rollback and use fallback
+        console.warn('generate_batch_number function call failed, rolling back and using fallback:', funcError.message);
+        await client.query('ROLLBACK');
+        batchFunctionExists = false;
+      }
+    }
+    
+    // Fallback: Generate batch number manually if function doesn't exist or failed
+    if (!batchFunctionExists) {
+      // If transaction was rolled back, restart it
+      try {
+        await client.query('BEGIN');
+      } catch (beginError) {
+        // Transaction might already be active or aborted
+        // Ignore error and continue
+      }
       
       let seqNum = 1;
       
+      // Use separate connection (pool.query) for fallback checks to avoid transaction issues
       // Try to get max sequence number from inventory_batches if table exists
       try {
-        const tableCheck = await client.query(`
+        const tableCheck = await pool.query(`
           SELECT EXISTS (
             SELECT FROM information_schema.tables 
             WHERE table_name = 'inventory_batches'
@@ -346,7 +377,7 @@ export const createProduction = async (req, res, next) => {
         `);
         
         if (tableCheck.rows[0].exists) {
-          const maxBatchResult = await client.query(
+          const maxBatchResult = await pool.query(
             `SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
              FROM inventory_batches
              WHERE inventory_item_id = $1 AND production_date = $2`,
@@ -360,7 +391,7 @@ export const createProduction = async (req, res, next) => {
       
       // Also check productions table for existing batches if batch column exists
       try {
-        const columnCheck = await client.query(`
+        const columnCheck = await pool.query(`
           SELECT EXISTS (
             SELECT FROM information_schema.columns 
             WHERE table_name = 'productions' AND column_name = 'batch'
@@ -368,7 +399,7 @@ export const createProduction = async (req, res, next) => {
         `);
         
         if (columnCheck.rows[0].exists) {
-          const maxProdBatchResult = await client.query(
+          const maxProdBatchResult = await pool.query(
             `SELECT COALESCE(MAX(CAST(SUBSTRING(batch FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
              FROM productions
              WHERE date = $1 AND batch IS NOT NULL`,

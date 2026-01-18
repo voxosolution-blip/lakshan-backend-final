@@ -67,7 +67,7 @@ export const getSalesDashboard = async (req, res, next) => {
         COUNT(*) as count,
         COALESCE(SUM(total_amount), 0) as total
       FROM sales
-      WHERE salesperson_id = $1 AND date = CURRENT_DATE AND is_reversed = false
+      WHERE salesperson_id = $1 AND date = CURRENT_DATE AND (is_reversed = false OR is_reversed IS NULL)
     `, [userId]);
     
     // Get this month's sales (exclude reversed)
