@@ -372,7 +372,7 @@ export const getBuyersWithPaymentStatus = async (req, res, next) => {
             0
           ) as total_paid_cleared
         FROM sales s
-        WHERE s.buyer_id = $1 AND s.salesperson_id = $2 AND s.is_reversed = false
+        WHERE s.buyer_id = $1 AND s.salesperson_id = $2 AND (s.is_reversed = false OR s.is_reversed IS NULL)
         ORDER BY s.date DESC
       `, [buyer.id, userId]);
       

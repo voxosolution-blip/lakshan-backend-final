@@ -991,7 +991,7 @@ async function exportSalesShopWiseExcel(req, res, next, range) {
       FROM sales s
       LEFT JOIN buyers b ON s.buyer_id = b.id
       LEFT JOIN users u ON s.salesperson_id = u.id
-      WHERE s.is_reversed = false
+      WHERE (s.is_reversed = false OR s.is_reversed IS NULL)
         AND s.date BETWEEN $1 AND $2
       ORDER BY b.shop_name, s.date DESC, s.created_at DESC
     `, [range.startDate, range.endDate]);

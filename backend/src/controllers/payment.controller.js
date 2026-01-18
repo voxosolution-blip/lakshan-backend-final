@@ -597,7 +597,7 @@ export const getChequeExpiryAlerts = async (req, res, next) => {
         AND c.return_date IS NOT NULL
         AND c.return_date >= CURRENT_DATE
         AND c.return_date <= CURRENT_DATE + INTERVAL '2 days'
-        AND s.is_reversed = false
+        AND (s.is_reversed = false OR s.is_reversed IS NULL)
       ORDER BY c.return_date ASC
     `);
     
@@ -755,7 +755,7 @@ export const getAllCheques = async (req, res, next) => {
       JOIN sales s ON p.sale_id = s.id
       LEFT JOIN buyers b ON s.buyer_id = b.id
       LEFT JOIN users u ON s.salesperson_id = u.id
-      WHERE s.is_reversed = false
+      WHERE (s.is_reversed = false OR s.is_reversed IS NULL)
     `;
     const params = [];
     

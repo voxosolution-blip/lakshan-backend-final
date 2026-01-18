@@ -20,21 +20,21 @@ export const getAdminDashboard = async (req, res, next) => {
         COUNT(*) as count,
         COALESCE(SUM(total_amount), 0) as total
       FROM sales
-      WHERE date = CURRENT_DATE AND is_reversed = false
+      WHERE date = CURRENT_DATE AND (is_reversed = false OR is_reversed IS NULL)
     `);
     
     // Get total revenue (exclude reversed)
     const revenueResult = await pool.query(`
       SELECT COALESCE(SUM(total_amount), 0) as total
       FROM sales
-      WHERE is_reversed = false
+      WHERE (is_reversed = false OR is_reversed IS NULL)
     `);
     
     // Get pending payments (exclude reversed)
     const pendingResult = await pool.query(`
       SELECT COALESCE(SUM(total_amount - COALESCE(paid_amount, 0)), 0) as total
       FROM sales
-      WHERE payment_status IN ('pending', 'partial') AND is_reversed = false
+      WHERE payment_status IN ('pending', 'partial') AND (is_reversed = false OR is_reversed IS NULL)
     `);
     
     // Get active products
@@ -78,7 +78,7 @@ export const getSalesDashboard = async (req, res, next) => {
       FROM sales
       WHERE salesperson_id = $1 
         AND date >= DATE_TRUNC('month', CURRENT_DATE)
-        AND is_reversed = false
+        AND (is_reversed = false OR is_reversed IS NULL)
     `, [userId]);
     
     res.json({
@@ -441,7 +441,7 @@ export const getShopWiseSalesData = async (req, res, next) => {
       FROM buyers b
       LEFT JOIN sales s ON b.id = s.buyer_id 
         AND EXTRACT(YEAR FROM s.date) = $1
-        AND s.is_reversed = false
+        AND (s.is_reversed = false OR s.is_reversed IS NULL)
       WHERE b.is_active = true
       GROUP BY b.id, b.shop_name
       HAVING COUNT(DISTINCT s.id) > 0
@@ -511,7 +511,7 @@ export const getFinishedGoodsChartData = async (req, res, next) => {
       JOIN products pr ON si.product_id = pr.id
       WHERE s.date >= $1::date 
         AND s.date <= CURRENT_DATE
-        AND s.is_reversed = false
+        AND (s.is_reversed = false OR s.is_reversed IS NULL)
       GROUP BY s.date, pr.name
       ORDER BY s.date ASC, pr.name ASC
     `, [startDate]);

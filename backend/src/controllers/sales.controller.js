@@ -16,7 +16,7 @@ export const getAllSales = async (req, res, next) => {
       FROM sales s
       LEFT JOIN buyers b ON s.buyer_id = b.id
       LEFT JOIN users u ON s.salesperson_id = u.id
-      WHERE s.is_reversed = false
+      WHERE (s.is_reversed = false OR s.is_reversed IS NULL)
     `;
     const params = [];
     
@@ -805,8 +805,8 @@ export const reverseSale = async (req, res, next) => {
     
     const sale = saleResult.rows[0];
     
-    // Check if already reversed
-    if (sale.is_reversed) {
+    // Check if already reversed (handle case where column doesn't exist)
+    if (sale.is_reversed === true) {
       return res.status(400).json({ 
         success: false, 
         message: 'This sale has already been reversed' 
