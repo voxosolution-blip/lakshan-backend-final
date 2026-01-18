@@ -149,36 +149,87 @@ Add these manually:
 
 ---
 
-## Step 6: Set Up Database Schema
+## Step 6: Set Up Database Schema ⚠️ REQUIRED!
+
+**You MUST run the database schema before your app will work!** If you see errors like `relation "users" does not exist`, you need to complete this step.
 
 ### 6.1 Connect to Railway PostgreSQL
 
-You have two options:
+You have three options:
 
-**Option A: Using Railway's PostgreSQL Connect Button**
-1. Go to your PostgreSQL service
-2. Click **"Connect"** button
-3. Railway will provide connection details
+**Option A: Using Railway's Web-Based Query Tool (Easiest)**
+1. Go to your **PostgreSQL service** in Railway dashboard
+2. Click on the **"Query"** or **"Data"** tab (if available)
+3. Or click **"Connect"** → This will show connection details
+4. Railway may provide a web-based query interface - use that if available
 
-**Option B: Using psql from your local machine**
-1. Get connection string from PostgreSQL service → Variables tab
-2. Use psql to connect:
+**Option B: Using Railway CLI (Recommended for larger schemas)**
+1. Install Railway CLI: `npm i -g @railway/cli` or visit https://railway.app/cli
+2. Login: `railway login`
+3. Link your project: `railway link`
+4. Get database connection: `railway connect postgres`
+5. This will open a psql session connected to your Railway database
+
+**Option C: Using psql from your local machine**
+1. Go to your PostgreSQL service → **Variables** tab
+2. Copy the `DATABASE_URL` or individual connection variables
+3. Use psql to connect:
    ```bash
+   # If you have DATABASE_URL
    psql $DATABASE_URL
+   
+   # Or using individual variables
+   psql -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDATABASE
    ```
 
 ### 6.2 Run Database Schema
 
-1. Connect to the database (as above)
-2. Copy contents of `backend/database/schema.sql`
-3. Paste and run in your database client
-4. Alternatively, if you have a migration tool, run migrations
+**Method 1: Using Railway CLI (Easiest)**
+```bash
+# If you have Railway CLI installed
+railway connect postgres < backend/database/schema.sql
+```
 
-### 6.3 Seed Initial Data (Optional)
+**Method 2: Copy-Paste the Schema**
+1. Open `backend/database/schema.sql` file (in your local project or on GitHub)
+2. Copy the entire contents
+3. Connect to Railway PostgreSQL (using any method from 6.1)
+4. Paste and execute the SQL
 
-If you have seed data:
-1. SSH into Railway or use Railway CLI
-2. Run: `npm run seed`
+**Method 3: Using psql from local machine**
+```bash
+# Get DATABASE_URL from Railway PostgreSQL service → Variables tab
+# Then run:
+psql $DATABASE_URL -f backend/database/schema.sql
+```
+
+### 6.3 Verify Schema Was Created
+
+After running the schema, verify it worked:
+
+1. Connect to your Railway PostgreSQL database
+2. Run: `\dt` (in psql) to list all tables
+3. You should see tables like: `users`, `farmers`, `inventory_items`, etc.
+
+Or test via your API:
+- Visit: `https://your-app.up.railway.app/health/db`
+- Should return database connection info (not an error)
+
+### 6.4 Seed Initial Data (Optional but Recommended)
+
+To create default admin and salesperson users:
+
+**Option A: Using Railway Shell**
+1. Go to your **backend service** → **Settings** → **Shell**
+2. Or use Railway CLI: `railway shell`
+3. Run: `npm run seed`
+
+**Option B: Manual Insert**
+You can manually insert users via the database connection if the seed script is not available.
+
+**Default login credentials** (after seeding):
+- Admin: `admin` / password set in seed script
+- Salesperson: `salesperson` / password set in seed script
 
 ---
 
@@ -230,10 +281,22 @@ If you see `❌ Database connection failed: connect ECONNREFUSED ::1:5435`:
 - Railway sets `PORT` automatically - don't override it
 - Your code uses `process.env.PORT || 5000` which is correct ✅
 
+### "relation does not exist" Error
+
+If you see `❌ Database connection failed: relation "users" does not exist`:
+
+**This means the database schema has not been run yet!**
+
+**Solution:**
+1. Go to **Step 6** in this guide
+2. Connect to your Railway PostgreSQL database
+3. Run the schema file: `backend/database/schema.sql`
+4. Redeploy your app after running the schema
+
 ### Application Crashes
 - Check **Logs** in Railway dashboard
 - Verify all required environment variables are set
-- Check database schema is initialized
+- Check database schema is initialized (see "relation does not exist" error above)
 
 ---
 
