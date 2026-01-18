@@ -116,7 +116,7 @@ Add these manually:
 
 1. `PORT` = `5000` (Railway will override with its own PORT, but this is a fallback)
 2. `NODE_ENV` = `production`
-3. `CORS_ORIGIN` = `https://your-frontend-domain.com` (replace with your frontend URL)
+3. `CORS_ORIGIN` = `https://your-frontend-domain.com` (optional - supports multiple origins comma-separated, e.g., `https://lakshanproducts01.netlify.app,https://yourdomain.com`. The app automatically allows Netlify domains containing `netlify.app`)
 4. `JWT_SECRET` = `your-super-secret-jwt-key-here` (generate a strong random string)
 5. `JWT_EXPIRES_IN` = `24h` (or your preferred expiration time)
 
