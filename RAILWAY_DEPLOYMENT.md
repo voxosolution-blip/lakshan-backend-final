@@ -81,20 +81,34 @@ Railway will use the `nixpacks.toml` configuration, but you can verify:
 
 ## Step 4: Configure Environment Variables
 
-### 4.1 Connect Database to Your App
+### 4.1 Connect Database to Your App (IMPORTANT!)
 
-1. Go back to your **backend service** (not the database)
+Railway automatically provides a `DATABASE_URL` environment variable when you create a PostgreSQL service. **Your app now supports this automatically!**
+
+#### Option A: Use DATABASE_URL (RECOMMENDED - Easiest)
+
+1. Go to your **backend service** (not the database)
 2. Click on **"Variables"** tab
-3. Click **"New Variable"**
-4. Add the following variables by clicking **"Reference Variable"**:
+3. Railway **automatically** provides `DATABASE_URL` from the PostgreSQL service
+4. Click **"Reference Variable"** → Select `DATABASE_URL` from your PostgreSQL service
+   - Variable: `DATABASE_URL` → Reference: `${{Postgres.DATABASE_URL}}`
+   
+   *(Replace `Postgres` with your actual PostgreSQL service name if different)*
+
+**That's it!** Your app will automatically use `DATABASE_URL` for the database connection.
+
+#### Option B: Use Individual Database Variables (Alternative)
+
+If you prefer using individual variables:
+
+1. Go to your **backend service** → **"Variables"** tab
+2. Add these by clicking **"Reference Variable"**:
 
    - Variable: `DB_HOST` → Reference: `${{Postgres.PGHOST}}`
    - Variable: `DB_PORT` → Reference: `${{Postgres.PGPORT}}`
    - Variable: `DB_NAME` → Reference: `${{Postgres.PGDATABASE}}`
    - Variable: `DB_USER` → Reference: `${{Postgres.PGUSER}}`
    - Variable: `DB_PASSWORD` → Reference: `${{Postgres.PGPASSWORD}}`
-
-   *(Replace `Postgres` with your actual PostgreSQL service name if different)*
 
 ### 4.2 Add Other Required Environment Variables
 
@@ -196,10 +210,21 @@ If you have seed data:
   - Missing `package.json` in root (but it's in `backend/` - set Root Directory!)
   - Build command errors - check Node.js version
 
-### Database Connection Errors
-- Verify all database environment variables are set correctly
-- Check that PostgreSQL service is running
-- Verify variable references use correct service name
+### Database Connection Errors (ECONNREFUSED)
+
+If you see `❌ Database connection failed: connect ECONNREFUSED ::1:5435`:
+
+**This means the app is trying to connect to localhost instead of Railway's PostgreSQL.**
+
+**Solution:**
+1. Go to your **backend service** → **Variables** tab
+2. Make sure `DATABASE_URL` is set and references your PostgreSQL service:
+   - Variable: `DATABASE_URL` → Reference: `${{Postgres.DATABASE_URL}}`
+3. OR set individual database variables:
+   - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+4. Verify PostgreSQL service is running (check the service status)
+5. Make sure variable references use the correct service name (case-sensitive)
+6. Click **"Redeploy"** after adding variables
 
 ### Port Issues
 - Railway sets `PORT` automatically - don't override it
