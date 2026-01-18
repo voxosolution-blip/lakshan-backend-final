@@ -2,6 +2,9 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import pool from './src/config/db.js';
 import { errorHandler } from './src/middlewares/error.middleware.js';
 import authRoutes from './src/routes/auth.routes.js';
@@ -23,6 +26,9 @@ import adminRoutes from './src/routes/admin.routes.js';
 import { initializeScheduledTasks } from './src/services/scheduledTasks.js';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -112,14 +118,35 @@ async function testDatabaseConnection() {
       }
     } catch (tableError) {
       if (tableError.message.includes('does not exist') || tableError.code === '42P01') {
-        console.error('\n❌ Database schema not found!');
-        console.error('   The database tables have not been created yet.');
-        console.error('\n💡 To fix this:');
-        console.error('   1. Connect to your Railway PostgreSQL database');
-        console.error('   2. Run the schema file: backend/database/schema.sql');
-        console.error('   3. See RAILWAY_DEPLOYMENT.md for detailed instructions');
-        console.error('\n   For Railway: Go to PostgreSQL service → Connect → Run schema.sql');
-        process.exit(1);
+        console.log('\n⚠️  Database schema not found!');
+        console.log('   Attempting to create schema automatically...');
+        
+        try {
+          // Read and execute schema file
+          const schemaPath = join(__dirname, 'database', 'schema.sql');
+          const schemaSQL = readFileSync(schemaPath, 'utf8');
+          
+          console.log('📋 Running database schema...');
+          await pool.query(schemaSQL);
+          
+          console.log('✅ Database schema created successfully!');
+          console.log('📊 Verifying tables...');
+          
+          // Verify tables were created
+          const verifyResult = await pool.query('SELECT COUNT(*) as count FROM users');
+          const count = parseInt(verifyResult.rows[0].count);
+          console.log(`✅ Schema verified! Found ${count} users in database.`);
+          console.log('🎉 Database is ready to use!\n');
+          
+        } catch (schemaError) {
+          console.error('\n❌ Error creating schema automatically:', schemaError.message);
+          console.error('\n💡 Manual fix required:');
+          console.error('   1. Connect to your Railway PostgreSQL database');
+          console.error('   2. Run the schema file: backend/database/schema.sql');
+          console.error('   3. See RAILWAY_DEPLOYMENT.md for detailed instructions');
+          console.error('\n   For Railway: Go to PostgreSQL service → Connect → Run schema.sql');
+          process.exit(1);
+        }
       } else {
         throw tableError;
       }
