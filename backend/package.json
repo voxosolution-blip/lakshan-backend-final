@@ -1,0 +1,36 @@
+{
+  "name": "yogurt-erp-backend",
+  "version": "1.0.0",
+  "description": "Yoghurt Factory ERP Backend API",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "start:docker": "powershell -ExecutionPolicy Bypass -File ./start-server.ps1",
+    "dev": "node --watch server.js",
+    "seed": "node src/utils/seed.js"
+  },
+  "keywords": [
+    "erp",
+    "yogurt",
+    "dairy"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.22.1",
+    "express-validator": "^7.0.1",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^4.2.1",
+    "pdfkit": "^0.17.1",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
