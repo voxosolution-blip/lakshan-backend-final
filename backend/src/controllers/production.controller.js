@@ -334,26 +334,52 @@ export const createProduction = async (req, res, next) => {
       console.warn('generate_batch_number function not found, using fallback method:', funcError.message);
       const datePart = productionDate; // Already in YYYY-MM-DD format
       
-      // Get max sequence number from existing batches for this date and item
-      const maxBatchResult = await client.query(
-        `SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
-         FROM inventory_batches
-         WHERE inventory_item_id = $1 AND production_date = $2`,
-        [finishedGoodsItemId, productionDate]
-      );
+      let seqNum = 1;
       
-      let seqNum = parseInt(maxBatchResult.rows[0]?.max_seq || 0) + 1;
+      // Try to get max sequence number from inventory_batches if table exists
+      try {
+        const tableCheck = await client.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = 'inventory_batches'
+          )
+        `);
+        
+        if (tableCheck.rows[0].exists) {
+          const maxBatchResult = await client.query(
+            `SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
+             FROM inventory_batches
+             WHERE inventory_item_id = $1 AND production_date = $2`,
+            [finishedGoodsItemId, productionDate]
+          );
+          seqNum = parseInt(maxBatchResult.rows[0]?.max_seq || 0) + 1;
+        }
+      } catch (batchError) {
+        console.warn('Could not query inventory_batches table:', batchError.message);
+      }
       
-      // Also check productions table for existing batches
-      const maxProdBatchResult = await client.query(
-        `SELECT COALESCE(MAX(CAST(SUBSTRING(batch FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
-         FROM productions
-         WHERE date = $1 AND batch IS NOT NULL`,
-        [productionDate]
-      );
-      
-      const prodSeq = parseInt(maxProdBatchResult.rows[0]?.max_seq || 0) + 1;
-      seqNum = Math.max(seqNum, prodSeq);
+      // Also check productions table for existing batches if batch column exists
+      try {
+        const columnCheck = await client.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.columns 
+            WHERE table_name = 'productions' AND column_name = 'batch'
+          )
+        `);
+        
+        if (columnCheck.rows[0].exists) {
+          const maxProdBatchResult = await client.query(
+            `SELECT COALESCE(MAX(CAST(SUBSTRING(batch FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
+             FROM productions
+             WHERE date = $1 AND batch IS NOT NULL`,
+            [productionDate]
+          );
+          const prodSeq = parseInt(maxProdBatchResult.rows[0]?.max_seq || 0) + 1;
+          seqNum = Math.max(seqNum, prodSeq);
+        }
+      } catch (prodError) {
+        console.warn('Could not query productions.batch column:', prodError.message);
+      }
       
       // Format: YYYY-MM-DD-001, YYYY-MM-DD-002, etc.
       batchNumber = `${datePart}-${String(seqNum).padStart(3, '0')}`;
@@ -1167,11 +1193,21 @@ export const getTodayProductionWithAllocations = async (req, res, next) => {
     
     // If table doesn't exist, return production without allocations
     if (!tableCheck.rows[0].exists) {
+      // Check if batch column exists
+      const batchColumnCheck = await pool.query(`
+        SELECT EXISTS (
+          SELECT FROM information_schema.columns 
+          WHERE table_name = 'productions' AND column_name = 'batch'
+        )
+      `);
+      
+      const batchSelect = batchColumnCheck.rows[0].exists ? 'p.batch' : 'NULL as batch';
+      
       const result = await pool.query(`
         SELECT 
           p.id as production_id,
           p.date as production_date,
-          p.batch,
+          ${batchSelect},
           p.quantity_produced,
           p.notes,
           pr.id as product_id,
@@ -1189,11 +1225,25 @@ export const getTodayProductionWithAllocations = async (req, res, next) => {
       return res.json({ success: true, data: result.rows });
     }
     
+    // Check if batch column exists
+    const batchColumnCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_name = 'productions' AND column_name = 'batch'
+      )
+    `);
+    
+    const hasBatchColumn = batchColumnCheck.rows[0].exists;
+    
+    // Build query based on whether batch column exists
+    const batchSelect = hasBatchColumn ? 'p.batch' : 'NULL as batch';
+    const batchGroupBy = hasBatchColumn ? 'p.batch,' : '';
+    
     const result = await pool.query(`
       SELECT 
         p.id as production_id,
         p.date as production_date,
-        p.batch,
+        ${batchSelect},
         p.quantity_produced,
         p.notes,
         pr.id as product_id,
@@ -1217,7 +1267,7 @@ export const getTodayProductionWithAllocations = async (req, res, next) => {
       LEFT JOIN salesperson_allocations sa ON p.id = sa.production_id
       LEFT JOIN users u ON sa.salesperson_id = u.id
       WHERE p.date = $1
-      GROUP BY p.id, p.date, p.batch, p.quantity_produced, p.notes, pr.id, pr.name, pr.category
+      GROUP BY p.id, p.date, ${batchGroupBy} p.quantity_produced, p.notes, pr.id, pr.name, pr.category
       ORDER BY pr.name, p.created_at DESC
     `, [today]);
     
