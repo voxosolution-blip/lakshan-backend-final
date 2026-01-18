@@ -79,6 +79,34 @@ export const getProductionCapacity = async (req, res, next) => {
 // Get all productions
 export const getAllProductions = async (req, res, next) => {
   try {
+    // Check if batch column exists
+    const columnCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_name = 'productions' AND column_name = 'batch'
+      )
+    `);
+    
+    // If batch column doesn't exist, select without it
+    if (!columnCheck.rows[0].exists) {
+      const result = await pool.query(`
+        SELECT 
+          p.id,
+          p.date,
+          NULL as batch,
+          p.quantity_produced,
+          p.notes,
+          p.created_at,
+          pr.id as product_id,
+          pr.name as product_name,
+          pr.category as product_category
+        FROM productions p
+        JOIN products pr ON p.product_id = pr.id
+        ORDER BY p.date DESC, p.created_at DESC
+      `);
+      return res.json({ success: true, data: result.rows });
+    }
+    
     const result = await pool.query(`
       SELECT 
         p.id,
@@ -293,11 +321,43 @@ export const createProduction = async (req, res, next) => {
     }
     
     // Generate batch number using database function (with explicit type casting)
-    const batchNumberResult = await client.query(
-      `SELECT generate_batch_number($1::UUID, $2::DATE) as batch_number`,
-      [finishedGoodsItemId, productionDate]
-    );
-    const batchNumber = batchNumberResult.rows[0].batch_number;
+    // Fallback to manual generation if function doesn't exist
+    let batchNumber;
+    try {
+      const batchNumberResult = await client.query(
+        `SELECT generate_batch_number($1::UUID, $2::DATE) as batch_number`,
+        [finishedGoodsItemId, productionDate]
+      );
+      batchNumber = batchNumberResult.rows[0].batch_number;
+    } catch (funcError) {
+      // Fallback: Generate batch number manually if function doesn't exist
+      console.warn('generate_batch_number function not found, using fallback method:', funcError.message);
+      const datePart = productionDate; // Already in YYYY-MM-DD format
+      
+      // Get max sequence number from existing batches for this date and item
+      const maxBatchResult = await client.query(
+        `SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
+         FROM inventory_batches
+         WHERE inventory_item_id = $1 AND production_date = $2`,
+        [finishedGoodsItemId, productionDate]
+      );
+      
+      let seqNum = parseInt(maxBatchResult.rows[0]?.max_seq || 0) + 1;
+      
+      // Also check productions table for existing batches
+      const maxProdBatchResult = await client.query(
+        `SELECT COALESCE(MAX(CAST(SUBSTRING(batch FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
+         FROM productions
+         WHERE date = $1 AND batch IS NOT NULL`,
+        [productionDate]
+      );
+      
+      const prodSeq = parseInt(maxProdBatchResult.rows[0]?.max_seq || 0) + 1;
+      seqNum = Math.max(seqNum, prodSeq);
+      
+      // Format: YYYY-MM-DD-001, YYYY-MM-DD-002, etc.
+      batchNumber = `${datePart}-${String(seqNum).padStart(3, '0')}`;
+    }
     
     // Create production record FIRST (before deducting inventory)
     // This ensures milk calculation includes this production
@@ -980,6 +1040,19 @@ async function updateRemainingStock(client, allocations) {
 // Get salesperson allocations
 export const getSalesAllocations = async (req, res, next) => {
   try {
+    // Check if salesperson_allocations table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'salesperson_allocations'
+      )
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      // Table doesn't exist - return empty array (migration not run yet)
+      return res.json({ success: true, data: [] });
+    }
+    
     const { date, status, salespersonId } = req.query;
     
     let query = `
@@ -1033,6 +1106,19 @@ export const getSalespersonInventory = async (req, res, next) => {
       });
     }
 
+    // Check if salesperson_allocations table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'salesperson_allocations'
+      )
+    `);
+    
+    if (!tableCheck.rows[0].exists) {
+      // Table doesn't exist - return empty array
+      return res.json({ success: true, data: [] });
+    }
+
     // Get all active allocations for this salesperson, grouped by product
     // Products don't have a unit column, so we default to 'piece'
     const result = await pool.query(`
@@ -1069,7 +1155,39 @@ export const getSalespersonInventory = async (req, res, next) => {
 // Get today's production with allocation summary
 export const getTodayProductionWithAllocations = async (req, res, next) => {
   try {
+    // Check if salesperson_allocations table exists
+    const tableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_name = 'salesperson_allocations'
+      )
+    `);
+    
     const today = new Date().toISOString().split('T')[0];
+    
+    // If table doesn't exist, return production without allocations
+    if (!tableCheck.rows[0].exists) {
+      const result = await pool.query(`
+        SELECT 
+          p.id as production_id,
+          p.date as production_date,
+          p.batch,
+          p.quantity_produced,
+          p.notes,
+          pr.id as product_id,
+          pr.name as product_name,
+          pr.category as product_category,
+          0 as total_allocated,
+          p.quantity_produced as remaining_quantity,
+          0 as salesperson_count,
+          '[]'::json as allocations
+        FROM productions p
+        JOIN products pr ON p.product_id = pr.id
+        WHERE p.date = $1
+        ORDER BY pr.name, p.created_at DESC
+      `, [today]);
+      return res.json({ success: true, data: result.rows });
+    }
     
     const result = await pool.query(`
       SELECT 

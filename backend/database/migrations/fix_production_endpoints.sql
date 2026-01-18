@@ -76,8 +76,9 @@ CREATE TRIGGER update_salesperson_allocations_updated_at
     BEFORE UPDATE ON salesperson_allocations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- 6. Create function to generate batch number
-CREATE OR REPLACE FUNCTION generate_batch_number(item_id UUID, prod_date DATE)
+-- 6. Create function to generate batch number (explicitly in public schema)
+DROP FUNCTION IF EXISTS generate_batch_number(UUID, DATE);
+CREATE OR REPLACE FUNCTION public.generate_batch_number(item_id UUID, prod_date DATE)
 RETURNS VARCHAR(100) AS $$
 DECLARE
     date_part VARCHAR(10);
@@ -87,11 +88,20 @@ BEGIN
     date_part := TO_CHAR(prod_date, 'YYYY-MM-DD');
     
     -- Get the next sequence number for this date and item
-    SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER)), 0) + 1
-    INTO seq_num
-    FROM inventory_batches
-    WHERE inventory_item_id = item_id
-    AND production_date = prod_date;
+    -- Check both inventory_batches and productions tables
+    SELECT COALESCE(
+        GREATEST(
+            (SELECT MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER))
+             FROM inventory_batches
+             WHERE inventory_item_id = item_id
+             AND production_date = prod_date),
+            (SELECT MAX(CAST(SUBSTRING(batch FROM '[0-9]+$') AS INTEGER))
+             FROM productions
+             WHERE date = prod_date)
+        ), 
+        0
+    ) + 1
+    INTO seq_num;
     
     -- Format: YYYY-MM-DD-001, YYYY-MM-DD-002, etc.
     batch_num := date_part || '-' || LPAD(seq_num::TEXT, 3, '0');
@@ -99,6 +109,9 @@ BEGIN
     RETURN batch_num;
 END;
 $$ LANGUAGE plpgsql;
+
+-- Grant execute permission on the function
+GRANT EXECUTE ON FUNCTION public.generate_batch_number(UUID, DATE) TO PUBLIC;
 
 -- 7. Ensure Finished Goods category exists
 INSERT INTO inventory_categories (name, description)
