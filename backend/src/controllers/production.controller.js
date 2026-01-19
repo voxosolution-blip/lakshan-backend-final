@@ -767,11 +767,13 @@ export const createSalesAllocation = async (req, res, next) => {
         
         // Create allocation record with full quantity
         // Note: If inventory was used, the allocation still shows full qty but production_id links to today's production
+        // Handle batch_number - use production.batch if available, otherwise generate one
+        const batchNum = production.batch || `${production.date || new Date().toISOString().split('T')[0]}-001`;
         const allocationResult = await client.query(
           `INSERT INTO salesperson_allocations (production_id, product_id, salesperson_id, batch_number, quantity_allocated, allocation_date, notes, allocated_by)
            VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7)
            RETURNING *`,
-          [prodId, prodProdId, salesId, production.batch, qty, notes || null, userId]
+          [prodId, prodProdId, salesId, batchNum, qty, notes || null, userId]
         );
         
         // Update inventory batch status - only if table exists
