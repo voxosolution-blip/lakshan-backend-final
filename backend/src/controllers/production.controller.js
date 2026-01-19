@@ -822,8 +822,10 @@ export const createSalesAllocation = async (req, res, next) => {
       const qty = parseFloat(quantityAllocated);
       
       if (inventoryItemId) {
+        // Check if we can allocate from inventory (requires inventory_batches table)
         if (!inventoryBatchesExists) {
           await client.query('ROLLBACK');
+          client.release();
           return res.status(400).json({ 
             success: false, 
             message: 'Allocating from inventory stock requires inventory_batches table. Please run database migrations first.' 
@@ -864,10 +866,11 @@ export const createSalesAllocation = async (req, res, next) => {
             WHERE table_name = 'productions' AND column_name = 'batch'
           )
         `);
-        const batchSelect2 = batchColCheck2.rows[0].exists ? 'p.batch' : 'NULL as batch';
+        const hasBatchCol2 = batchColCheck2.rows[0].exists;
+        const batchSelect2 = hasBatchCol2 ? 'p.batch' : 'NULL';
         
         const productionResult = await client.query(
-          `SELECT p.*, pr.name as product_name, ${batchSelect2}
+          `SELECT p.*, pr.name as product_name, ${batchSelect2} as batch
            FROM productions p
            JOIN products pr ON p.product_id = pr.id
            WHERE p.id = $1`,
@@ -974,10 +977,11 @@ export const createSalesAllocation = async (req, res, next) => {
             WHERE table_name = 'productions' AND column_name = 'batch'
           )
         `);
-        const batchSelect3 = batchColCheck3.rows[0].exists ? 'p.batch' : 'NULL as batch';
+        const hasBatchCol3 = batchColCheck3.rows[0].exists;
+        const batchSelect3 = hasBatchCol3 ? 'p.batch' : 'NULL';
         
         const productionResult = await client.query(
-          `SELECT p.*, pr.name as product_name, ${batchSelect3}
+          `SELECT p.*, pr.name as product_name, ${batchSelect3} as batch
            FROM productions p
            JOIN products pr ON p.product_id = pr.id
            WHERE p.id = $1`,
@@ -1155,10 +1159,11 @@ async function updateRemainingStock(client, allocations) {
           WHERE table_name = 'productions' AND column_name = 'batch'
         )
       `);
-      const batchSelect = batchColCheck.rows[0].exists ? 'p.batch' : 'NULL as batch';
+      const hasBatchCol = batchColCheck.rows[0].exists;
+      const batchSelect = hasBatchCol ? 'p.batch' : 'NULL';
       
       const prodResult = await client.query(
-        `SELECT p.quantity_produced, ${batchSelect}, pr.name as product_name
+        `SELECT p.quantity_produced, ${batchSelect} as batch, pr.name as product_name
          FROM productions p
          JOIN products pr ON p.product_id = pr.id
          WHERE p.id = $1`,
@@ -1274,7 +1279,8 @@ export const getSalesAllocations = async (req, res, next) => {
         WHERE table_name = 'productions' AND column_name = 'batch'
       )
     `);
-    const batchSelect = batchColCheck.rows[0].exists ? 'pr.batch' : 'NULL as batch';
+    const hasBatchColumn = batchColCheck.rows[0].exists;
+    const batchSelect = hasBatchColumn ? 'pr.batch' : 'NULL';
     
     // Build SELECT with only existing columns
     const saColumns = [
@@ -1328,8 +1334,8 @@ export const getSalesAllocations = async (req, res, next) => {
   } catch (error) {
     console.error('Error getting sales allocations:', error);
     // If query fails, try to return empty array instead of error
-    if (error.code === '42703' || error.message.includes('does not exist')) {
-      console.warn('Schema mismatch in salesperson_allocations table, returning empty array');
+    if (error.code === '42703' || error.code === '42601' || error.message.includes('does not exist') || error.message.includes('syntax error')) {
+      console.warn('Schema mismatch or syntax error in salesperson_allocations query, returning empty array');
       return res.json({ success: true, data: [] });
     }
     next(error);
@@ -1417,13 +1423,14 @@ export const getTodayProductionWithAllocations = async (req, res, next) => {
         )
       `);
       
-      const batchSelect = batchColumnCheck.rows[0].exists ? 'p.batch' : 'NULL as batch';
+      const hasBatchCol = batchColumnCheck.rows[0].exists;
+      const batchSelect = hasBatchCol ? 'p.batch' : 'NULL';
       
       const result = await pool.query(`
         SELECT 
           p.id as production_id,
           p.date as production_date,
-          ${batchSelect},
+          ${batchSelect} as batch,
           p.quantity_produced,
           p.notes,
           pr.id as product_id,
@@ -1452,14 +1459,14 @@ export const getTodayProductionWithAllocations = async (req, res, next) => {
     const hasBatchColumn = batchColumnCheck.rows[0].exists;
     
     // Build query based on whether batch column exists
-    const batchSelect = hasBatchColumn ? 'p.batch' : 'NULL as batch';
+    const batchSelect = hasBatchColumn ? 'p.batch' : 'NULL';
     const batchGroupBy = hasBatchColumn ? 'p.batch,' : '';
     
     const result = await pool.query(`
       SELECT 
         p.id as production_id,
         p.date as production_date,
-        ${batchSelect},
+        ${batchSelect} as batch,
         p.quantity_produced,
         p.notes,
         pr.id as product_id,
