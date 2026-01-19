@@ -58,20 +58,29 @@ app.use(errorHandler);
 async function ensureCriticalSchema() {
     console.log('  Running CRITICAL schema verification...');
     try {
+        // 1. Settings
         await pool.query(`CREATE TABLE IF NOT EXISTS settings (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
             key VARCHAR(100) UNIQUE NOT NULL,
             value TEXT,
             description TEXT,
+            updated_by UUID REFERENCES users(id),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )`);
+
+        // Add updated_by if missing (for legacy tables)
+        await pool.query(`ALTER TABLE settings ADD COLUMN IF NOT EXISTS updated_by UUID REFERENCES users(id)`);
+
         await pool.query(`INSERT INTO settings (key, value) VALUES 
             ('milk_price_per_liter', '100'),
-            ('default_worker_daily_salary', '1500'),
-            ('epf_percentage', '8'),
-            ('etf_percentage', '3')
+            ('worker_default_daily_salary', '1500'),
+            ('worker_default_epf_percentage', '8'),
+            ('worker_default_etf_percentage', '3'),
+            ('worker_default_free_products', '[]')
             ON CONFLICT (key) DO NOTHING`);
+
+        // 2. Locations & Sales
         await pool.query(`CREATE TABLE IF NOT EXISTS salesperson_locations (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
             user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -82,6 +91,73 @@ async function ensureCriticalSchema() {
         await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_reversed BOOLEAN DEFAULT false`);
         await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS free_quantity DECIMAL(10, 2) DEFAULT 0`);
         await pool.query(`ALTER TABLE productions ADD COLUMN IF NOT EXISTS batch VARCHAR(100)`);
+
+        // 3. Worker System
+        await pool.query(`CREATE TABLE IF NOT EXISTS workers (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            name VARCHAR(255) NOT NULL,
+            phone VARCHAR(20),
+            address TEXT,
+            epf_number VARCHAR(50),
+            etf_number VARCHAR(50),
+            daily_salary DECIMAL(10, 2) DEFAULT 0.00,
+            main_salary DECIMAL(10, 2) DEFAULT 0.00,
+            epf_percentage DECIMAL(5, 2) DEFAULT 8.00,
+            etf_percentage DECIMAL(5, 2) DEFAULT 3.00,
+            job_role VARCHAR(100),
+            is_active BOOLEAN DEFAULT true,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        // Add missing columns to workers if they exist but are incomplete
+        await pool.query(`ALTER TABLE workers ADD COLUMN IF NOT EXISTS daily_salary DECIMAL(10, 2) DEFAULT 0.00`);
+        await pool.query(`ALTER TABLE workers ADD COLUMN IF NOT EXISTS epf_percentage DECIMAL(5, 2) DEFAULT 8.00`);
+        await pool.query(`ALTER TABLE workers ADD COLUMN IF NOT EXISTS etf_percentage DECIMAL(5, 2) DEFAULT 3.00`);
+
+        await pool.query(`CREATE TABLE IF NOT EXISTS worker_advances (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            amount DECIMAL(10, 2) NOT NULL,
+            payment_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+
+        await pool.query(`CREATE TABLE IF NOT EXISTS salary_bonus (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            monthly_bonus DECIMAL(10, 2) DEFAULT 0.00,
+            late_bonus DECIMAL(10, 2) DEFAULT 0.00,
+            UNIQUE(worker_id, year, month)
+        )`);
+
+        await pool.query(`CREATE TABLE IF NOT EXISTS payroll (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            daily_salary DECIMAL(10, 2) DEFAULT 0.00,
+            working_days INTEGER DEFAULT 0,
+            main_salary DECIMAL(10, 2) DEFAULT 0.00,
+            monthly_bonus DECIMAL(10, 2) DEFAULT 0.00,
+            late_bonus DECIMAL(10, 2) DEFAULT 0.00,
+            advance_amount DECIMAL(10, 2) DEFAULT 0.00,
+            epf_amount DECIMAL(10, 2) DEFAULT 0.00,
+            etf_amount DECIMAL(10, 2) DEFAULT 0.00,
+            gross_salary DECIMAL(10, 2) DEFAULT 0.00,
+            total_deductions DECIMAL(10, 2) DEFAULT 0.00,
+            net_pay DECIMAL(10, 2) DEFAULT 0.00,
+            created_by UUID REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(worker_id, year, month)
+        )`);
+
+        // 4. Farmer System
         await pool.query(`CREATE TABLE IF NOT EXISTS farmer_free_products (
             id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
             farmer_id UUID NOT NULL REFERENCES farmers(id) ON DELETE CASCADE,
@@ -93,19 +169,7 @@ async function ensureCriticalSchema() {
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(farmer_id, year, month, product_id)
         )`);
-        await pool.query(`CREATE TABLE IF NOT EXISTS workers (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            name VARCHAR(255) NOT NULL,
-            is_active BOOLEAN DEFAULT true
-        )`);
-        await pool.query(`CREATE TABLE IF NOT EXISTS payroll (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
-            month INTEGER NOT NULL,
-            year INTEGER NOT NULL,
-            net_pay DECIMAL(10, 2) DEFAULT 0.00,
-            UNIQUE(worker_id, year, month)
-        )`);
+
         console.log(' Critical schema verified.');
     } catch (error) {
         console.error(' Schema verification failed:', error.message);
