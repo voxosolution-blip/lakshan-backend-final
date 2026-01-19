@@ -981,7 +981,7 @@ export const createSalesAllocation = async (req, res, next) => {
         }
         
         production = productionResult.rows[0];
-        batchNumber = production.batch;
+        batchNumber = production.batch || (production.date ? `${production.date}-001` : `${new Date().toISOString().split('T')[0]}-001`);
         
         // Get already allocated quantity
         const allocatedResult = await client.query(
@@ -1072,11 +1072,13 @@ export const createSalesAllocation = async (req, res, next) => {
       }
       
       // Create allocation record
+      // Ensure batchNumber has a value (should already be set above, but add fallback)
+      const finalBatchNumber = batchNumber || (production.date ? `${production.date}-001` : `${new Date().toISOString().split('T')[0]}-001`);
       const result = await client.query(
         `INSERT INTO salesperson_allocations (production_id, product_id, salesperson_id, batch_number, quantity_allocated, allocation_date, notes, allocated_by)
          VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7)
          RETURNING *`,
-        [actualProductionId, productId, salespersonId, batchNumber, qty, notes || null, userId]
+        [actualProductionId, productId, salespersonId, finalBatchNumber, qty, notes || null, userId]
       );
       
       // Update inventory batch status (if allocating from production) - only if table exists
