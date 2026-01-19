@@ -1259,12 +1259,21 @@ export const getSalesAllocations = async (req, res, next) => {
     
     const { date, status, salespersonId } = req.query;
     
+    // Check if batch column exists in productions table
+    const batchColCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_name = 'productions' AND column_name = 'batch'
+      )
+    `);
+    const batchSelect = batchColCheck.rows[0].exists ? 'pr.batch' : 'NULL as batch';
+    
     let query = `
       SELECT 
         sa.*,
         p.name as product_name,
         pr.date as production_date,
-        pr.batch as production_batch,
+        ${batchSelect} as production_batch,
         u.name as salesperson_name,
         allocator.name as allocated_by_name
       FROM salesperson_allocations sa
