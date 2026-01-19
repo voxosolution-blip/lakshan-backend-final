@@ -606,20 +606,51 @@ export const createSalesAllocation = async (req, res, next) => {
     `);
     const inventoryBatchesExists = inventoryBatchesCheck.rows[0].exists;
     
-    // Check if salesperson_allocations table exists
+    // Check if salesperson_allocations table exists, create it if it doesn't
     const salesAllocationsCheck = await pool.query(`
       SELECT EXISTS (
         SELECT FROM information_schema.tables 
         WHERE table_name = 'salesperson_allocations'
       )
     `);
-    const salesAllocationsExists = salesAllocationsCheck.rows[0].exists;
+    let salesAllocationsExists = salesAllocationsCheck.rows[0].exists;
     
     if (!salesAllocationsExists) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Allocations feature not available. Please run database migrations first.' 
-      });
+      // Try to create the table automatically
+      try {
+        await pool.query(`
+          CREATE TABLE IF NOT EXISTS salesperson_allocations (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            production_id UUID NOT NULL REFERENCES productions(id) ON DELETE CASCADE,
+            product_id UUID NOT NULL REFERENCES products(id),
+            salesperson_id UUID NOT NULL REFERENCES users(id),
+            batch_number VARCHAR(100) NOT NULL,
+            quantity_allocated DECIMAL(10, 2) NOT NULL CHECK (quantity_allocated > 0),
+            allocation_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'completed', 'returned', 'cancelled')),
+            notes TEXT,
+            allocated_by UUID REFERENCES users(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        
+        // Create indexes
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_production ON salesperson_allocations(production_id)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_product ON salesperson_allocations(product_id)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_salesperson ON salesperson_allocations(salesperson_id)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_date ON salesperson_allocations(allocation_date)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_status ON salesperson_allocations(status)`);
+        
+        salesAllocationsExists = true;
+        console.log('✅ Created salesperson_allocations table automatically');
+      } catch (createError) {
+        console.error('Failed to create salesperson_allocations table:', createError.message);
+        return res.status(500).json({ 
+          success: false, 
+          message: 'Allocations feature requires database setup. Please run migrations first.' 
+        });
+      }
     }
     
     // Support both single allocation and bulk allocations
