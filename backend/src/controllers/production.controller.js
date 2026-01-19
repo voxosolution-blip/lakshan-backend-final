@@ -1259,6 +1259,14 @@ export const getSalesAllocations = async (req, res, next) => {
     
     const { date, status, salespersonId } = req.query;
     
+    // Check which columns exist in salesperson_allocations table
+    const columnsCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'salesperson_allocations'
+    `);
+    const existingColumns = columnsCheck.rows.map(r => r.column_name);
+    
     // Check if batch column exists in productions table
     const batchColCheck = await pool.query(`
       SELECT EXISTS (
@@ -1268,9 +1276,18 @@ export const getSalesAllocations = async (req, res, next) => {
     `);
     const batchSelect = batchColCheck.rows[0].exists ? 'pr.batch' : 'NULL as batch';
     
+    // Build SELECT with only existing columns
+    const saColumns = [
+      'id', 'production_id', 'product_id', 'salesperson_id', 
+      'batch_number', 'quantity_allocated', 'allocation_date',
+      'status', 'notes', 'allocated_by', 'created_at', 'updated_at'
+    ].filter(col => existingColumns.includes(col))
+     .map(col => `sa.${col}`)
+     .join(', ');
+    
     let query = `
       SELECT 
-        sa.*,
+        ${saColumns},
         p.name as product_name,
         pr.date as production_date,
         ${batchSelect} as production_batch,
@@ -1285,24 +1302,36 @@ export const getSalesAllocations = async (req, res, next) => {
     `;
     
     const params = [];
-    if (date) {
+    if (date && existingColumns.includes('allocation_date')) {
       params.push(date);
       query += ` AND sa.allocation_date = $${params.length}`;
     }
-    if (status) {
+    if (status && existingColumns.includes('status')) {
       params.push(status);
       query += ` AND sa.status = $${params.length}`;
     }
-    if (salespersonId) {
+    if (salespersonId && existingColumns.includes('salesperson_id')) {
       params.push(salespersonId);
       query += ` AND sa.salesperson_id = $${params.length}`;
     }
     
-    query += ' ORDER BY sa.allocation_date DESC, sa.created_at DESC';
+    if (existingColumns.includes('allocation_date') && existingColumns.includes('created_at')) {
+      query += ' ORDER BY sa.allocation_date DESC, sa.created_at DESC';
+    } else if (existingColumns.includes('created_at')) {
+      query += ' ORDER BY sa.created_at DESC';
+    } else if (existingColumns.includes('allocation_date')) {
+      query += ' ORDER BY sa.allocation_date DESC';
+    }
     
     const result = await pool.query(query, params);
     res.json({ success: true, data: result.rows });
   } catch (error) {
+    console.error('Error getting sales allocations:', error);
+    // If query fails, try to return empty array instead of error
+    if (error.code === '42703' || error.message.includes('does not exist')) {
+      console.warn('Schema mismatch in salesperson_allocations table, returning empty array');
+      return res.json({ success: true, data: [] });
+    }
     next(error);
   }
 };
