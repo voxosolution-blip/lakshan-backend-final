@@ -967,8 +967,17 @@ export const createSalesAllocation = async (req, res, next) => {
         
       } else {
         // Allocating from production
+        // Check if batch column exists
+        const batchColCheck3 = await pool.query(`
+          SELECT EXISTS (
+            SELECT FROM information_schema.columns 
+            WHERE table_name = 'productions' AND column_name = 'batch'
+          )
+        `);
+        const batchSelect3 = batchColCheck3.rows[0].exists ? 'p.batch' : 'NULL as batch';
+        
         const productionResult = await client.query(
-          `SELECT p.*, pr.name as product_name, p.batch
+          `SELECT p.*, pr.name as product_name, ${batchSelect3}
            FROM productions p
            JOIN products pr ON p.product_id = pr.id
            WHERE p.id = $1`,
