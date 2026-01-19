@@ -1,8 +1,7 @@
-// Main Server Entry Point
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import pool from './src/config/db.js';
@@ -33,68 +32,10 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware - CORS configuration
-const allowedOrigins = process.env.CORS_ORIGIN 
-  ? process.env.CORS_ORIGIN.split(',').map(origin => origin.trim())
-  : ['http://localhost:5173'];
-
-// Add localhost for development if not in production
-if (process.env.NODE_ENV !== 'production') {
-  if (!allowedOrigins.includes('http://localhost:5173')) {
-    allowedOrigins.push('http://localhost:5173');
-  }
-}
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      // Check if origin matches Netlify pattern (for preview deployments)
-      if (origin.includes('lakshanproducts01.netlify.app') || 
-          origin.includes('netlify.app')) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'ERP API is running' });
-});
-
-// Database health check
-app.get('/health/db', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT NOW() as time, version() as version');
-    const userCount = await pool.query('SELECT COUNT(*) as count FROM users');
-    res.json({ 
-      status: 'ok', 
-      database: 'connected',
-      timestamp: result.rows[0].time,
-      users: parseInt(userCount.rows[0].count)
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      status: 'error', 
-      database: 'disconnected',
-      error: error.message 
-    });
-  }
-});
-
-// API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/farmers', farmerRoutes);
 app.use('/api/inventory', inventoryRoutes);
@@ -112,103 +53,73 @@ app.use('/api/workers', workerRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/admin', adminRoutes);
 
-// Error handling middleware (must be last)
 app.use(errorHandler);
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Route not found' });
-});
-
-// Test database connection on startup
-async function testDatabaseConnection() {
-  try {
-    const result = await pool.query('SELECT NOW()');
-    console.log('✅ Database connected successfully');
-    console.log(`   Database time: ${result.rows[0].now}`);
-    
-    // Check if users table exists
+async function ensureCriticalSchema() {
+    console.log('  Running CRITICAL schema verification...');
     try {
-      const userCount = await pool.query('SELECT COUNT(*) as count FROM users');
-      const count = parseInt(userCount.rows[0].count);
-      console.log(`   Users in database: ${count}`);
-      
-      if (count === 0) {
-        console.log('⚠️  No users found in database. Run: npm run seed');
-      } else {
-        // Check if default users exist
-        const adminUser = await pool.query('SELECT username FROM users WHERE username = $1', ['admin']);
-        const salesUser = await pool.query('SELECT username FROM users WHERE username IN ($1, $2) LIMIT 1', ['sales', 'salesperson']);
-        
-        if (adminUser.rows.length === 0 || salesUser.rows.length === 0) {
-          console.log('⚠️  Default users (admin/salesperson) not found. Run: npm run seed');
-        }
-      }
-    } catch (tableError) {
-      if (tableError.message.includes('does not exist') || tableError.code === '42P01') {
-        console.log('\n⚠️  Database schema not found!');
-        console.log('   Attempting to create schema automatically...');
-        
-        try {
-          // Read and execute schema file
-          const schemaPath = join(__dirname, 'database', 'schema.sql');
-          const schemaSQL = readFileSync(schemaPath, 'utf8');
-          
-          console.log('📋 Running database schema...');
-          await pool.query(schemaSQL);
-          
-          console.log('✅ Database schema created successfully!');
-          console.log('📊 Verifying tables...');
-          
-          // Verify tables were created
-          const verifyResult = await pool.query('SELECT COUNT(*) as count FROM users');
-          const count = parseInt(verifyResult.rows[0].count);
-          console.log(`✅ Schema verified! Found ${count} users in database.`);
-          console.log('🎉 Database is ready to use!\n');
-          
-        } catch (schemaError) {
-          console.error('\n❌ Error creating schema automatically:', schemaError.message);
-          console.error('\n💡 Manual fix required:');
-          console.error('   1. Connect to your Railway PostgreSQL database');
-          console.error('   2. Run the schema file: backend/database/schema.sql');
-          console.error('   3. See RAILWAY_DEPLOYMENT.md for detailed instructions');
-          console.error('\n   For Railway: Go to PostgreSQL service → Connect → Run schema.sql');
-          process.exit(1);
-        }
-      } else {
-        throw tableError;
-      }
+        await pool.query(`CREATE TABLE IF NOT EXISTS settings (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            key VARCHAR(100) UNIQUE NOT NULL,
+            value TEXT,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )`);
+        await pool.query(`INSERT INTO settings (key, value) VALUES 
+            ('milk_price_per_liter', '100'),
+            ('default_worker_daily_salary', '1500'),
+            ('epf_percentage', '8'),
+            ('etf_percentage', '3')
+            ON CONFLICT (key) DO NOTHING`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS salesperson_locations (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            latitude DECIMAL(10, 8) NOT NULL,
+            longitude DECIMAL(11, 8) NOT NULL,
+            UNIQUE(user_id)
+        )`);
+        await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_reversed BOOLEAN DEFAULT false`);
+        await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS free_quantity DECIMAL(10, 2) DEFAULT 0`);
+        await pool.query(`ALTER TABLE productions ADD COLUMN IF NOT EXISTS batch VARCHAR(100)`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS farmer_free_products (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            farmer_id UUID NOT NULL REFERENCES farmers(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            product_id UUID REFERENCES products(id),
+            quantity DECIMAL(10, 2) NOT NULL,
+            issued_at TIMESTAMP NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(farmer_id, year, month, product_id)
+        )`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS workers (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            name VARCHAR(255) NOT NULL,
+            is_active BOOLEAN DEFAULT true
+        )`);
+        await pool.query(`CREATE TABLE IF NOT EXISTS payroll (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            worker_id UUID NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            net_pay DECIMAL(10, 2) DEFAULT 0.00,
+            UNIQUE(worker_id, year, month)
+        )`);
+        console.log(' Critical schema verified.');
+    } catch (error) {
+        console.error(' Schema verification failed:', error.message);
     }
-  } catch (error) {
-    if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-      console.error('❌ Database connection failed:', error.message);
-      console.error('\n💡 Troubleshooting:');
-      if (process.env.NODE_ENV === 'production' || process.env.DATABASE_URL) {
-        console.error('   1. Check Railway PostgreSQL service is running');
-        console.error('   2. Verify DATABASE_URL environment variable is set correctly');
-        console.error('   3. Check your service Variables in Railway dashboard');
-      } else {
-        console.error('   1. Make sure Docker Desktop is running');
-        console.error('   2. Check if PostgreSQL container is running: docker ps');
-        console.error('   3. Start the container: docker-compose up -d postgres');
-        console.error('   4. Verify port 5435 is accessible');
-      }
-    } else {
-      console.error('❌ Database error:', error.message);
-    }
-    process.exit(1);
-  }
 }
 
-// Start server
 app.listen(PORT, async () => {
-  console.log(`🚀 ERP Server running on port ${PORT}`);
-  console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log('');
-  await testDatabaseConnection();
-  
-  // Initialize scheduled tasks
-  initializeScheduledTasks();
+    console.log(` ERP Server running on port ${PORT}`);
+    try {
+        await pool.query('SELECT NOW()');
+        console.log(' Database connected');
+        await ensureCriticalSchema();
+        initializeScheduledTasks();
+    } catch (err) {
+        console.error(' Startup failed:', err.message);
+    }
 });
-
-
