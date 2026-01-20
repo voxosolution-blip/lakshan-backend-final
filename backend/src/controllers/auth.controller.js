@@ -75,6 +75,14 @@ export const login = async (req, res, next) => {
   }
 };
 
+// Stateless logout endpoint for clients to clear tokens locally
+export const logout = async (_req, res) => {
+  return res.json({
+    success: true,
+    message: 'Logout successful'
+  });
+};
+
 export const register = async (req, res, next) => {
   try {
     const { username, password, email, name, role } = req.body;
