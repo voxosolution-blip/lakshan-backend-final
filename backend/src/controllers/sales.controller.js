@@ -792,7 +792,8 @@ export const reverseSale = async (req, res, next) => {
     
     // Check if sale exists and is not already reversed
     const saleResult = await client.query(
-      `SELECT s.*, u.role as salesperson_role, COALESCE(s.sold_by, 'SALESPERSON') as sold_by
+      `SELECT s.*, u.role as salesperson_role, 
+              CASE WHEN UPPER(u.role) = 'ADMIN' THEN 'ADMIN' ELSE 'SALESPERSON' END as sold_by
        FROM sales s
        LEFT JOIN users u ON s.salesperson_id = u.id
        WHERE s.id = $1`,

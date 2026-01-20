@@ -74,3 +74,5 @@ The code is now **fully defensive** and handles missing tables/columns gracefull
 
 **The migration is safe to run multiple times** - it checks if things exist before creating them.
 
+
+

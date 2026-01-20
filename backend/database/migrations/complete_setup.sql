@@ -167,3 +167,5 @@ UPDATE sales SET is_edited = false WHERE is_edited IS NULL;
 -- Done!
 SELECT '✅ Complete database setup finished successfully!' as status;
 
+
+
