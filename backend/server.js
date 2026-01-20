@@ -89,6 +89,12 @@ async function ensureCriticalSchema() {
             UNIQUE(user_id)
         )`);
         await pool.query(`ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_reversed BOOLEAN DEFAULT false`);
+        await pool.query(ALTER TABLE sales ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMP);
+        await pool.query(ALTER TABLE sales ADD COLUMN IF NOT EXISTS reversed_by UUID REFERENCES users(id));
+        await pool.query(ALTER TABLE sales ADD COLUMN IF NOT EXISTS reverse_reason TEXT);
+        await pool.query(ALTER TABLE sales ADD COLUMN IF NOT EXISTS is_edited BOOLEAN DEFAULT false);
+        await pool.query(ALTER TABLE sales ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP);
+        await pool.query(ALTER TABLE sales ADD COLUMN IF NOT EXISTS edited_by UUID REFERENCES users(id));
         await pool.query(`ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS free_quantity DECIMAL(10, 2) DEFAULT 0`);
         await pool.query(`ALTER TABLE productions ADD COLUMN IF NOT EXISTS batch VARCHAR(100)`);
 

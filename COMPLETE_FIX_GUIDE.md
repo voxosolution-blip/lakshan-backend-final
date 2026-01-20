@@ -76,3 +76,4 @@ The code is now **fully defensive** and handles missing tables/columns gracefull
 
 
 
+

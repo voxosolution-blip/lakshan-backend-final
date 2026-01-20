@@ -19,7 +19,14 @@ CREATE TABLE users (
     role VARCHAR(50) NOT NULL DEFAULT 'SALESPERSON' CHECK (role IN ('ADMIN', 'SALESPERSON', 'ACCOUNTANT', 'PRODUCTION')),
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_users_username ON users(username);
@@ -38,7 +45,14 @@ CREATE TABLE farmers (
     allowance DECIMAL(10, 2) DEFAULT 0.00, -- Monthly allowance
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_farmers_active ON farmers(is_active);
@@ -52,7 +66,14 @@ CREATE TABLE milk_collections (
     quantity_liters DECIMAL(10, 2) NOT NULL CHECK (quantity_liters > 0),
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_milk_collections_farmer ON milk_collections(farmer_id);
@@ -87,7 +108,14 @@ CREATE TABLE inventory_items (
     expiry_date DATE,
     price DECIMAL(10, 2) DEFAULT 0.00,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_inventory_category ON inventory_items(category_id);
@@ -106,7 +134,14 @@ CREATE TABLE products (
     is_active BOOLEAN DEFAULT true,
     description TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_products_active ON products(is_active);
@@ -119,7 +154,14 @@ CREATE TABLE product_bom (
     quantity_required DECIMAL(10, 2) NOT NULL CHECK (quantity_required > 0),
     unit VARCHAR(50) NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
     UNIQUE(product_id, inventory_item_id)
 );
 
@@ -138,7 +180,14 @@ CREATE TABLE productions (
     notes TEXT,
     created_by UUID REFERENCES users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_productions_date ON productions(date);
@@ -156,7 +205,14 @@ CREATE TABLE buyers (
     address TEXT,
     is_active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_buyers_active ON buyers(is_active);
@@ -170,7 +226,14 @@ CREATE TABLE sales (
     payment_status VARCHAR(50) DEFAULT 'pending' CHECK (payment_status IN ('pending', 'partial', 'paid')),
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_sales_buyer ON sales(buyer_id);
@@ -205,7 +268,14 @@ CREATE TABLE payments (
     payment_date DATE DEFAULT CURRENT_DATE,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_payments_sale ON payments(sale_id);
@@ -223,7 +293,14 @@ CREATE TABLE cheques (
     status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'cleared', 'bounced', 'cancelled')),
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_cheques_payment ON cheques(payment_id);
@@ -246,7 +323,14 @@ CREATE TABLE returns (
     replacement_quantity DECIMAL(10, 2),
     processed_by UUID REFERENCES users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_returns_sale ON returns(sale_id);
@@ -266,7 +350,14 @@ CREATE TABLE expenses (
     category VARCHAR(100), -- e.g., 'operational', 'maintenance', 'utilities'
     created_by UUID REFERENCES users(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_at TIMESTAMP,
+    reversed_by UUID REFERENCES users(id),
+    reverse_reason TEXT,
+    is_edited BOOLEAN DEFAULT false,
+    edited_at TIMESTAMP,
+    edited_by UUID REFERENCES users(id)
 );
 
 CREATE INDEX idx_expenses_date ON expenses(date);
