@@ -15,7 +15,7 @@ export const getAllExpenses = async (req, res, next) => {
     
     if (userRole === 'SALESPERSON') {
       query = `
-        SELECT e.*, u.name as salesperson_name, u.username as salesperson_username
+        SELECT e.*, u.name as salesperson_name, u.username as salesperson_username, u.role as created_by_role
         FROM expenses e
         LEFT JOIN users u ON e.created_by = u.id
         WHERE e.created_by = $1
@@ -23,7 +23,7 @@ export const getAllExpenses = async (req, res, next) => {
       params.push(userId);
     } else {
       query = `
-        SELECT e.*, u.name as salesperson_name, u.username as salesperson_username
+        SELECT e.*, u.name as salesperson_name, u.username as salesperson_username, u.role as created_by_role
         FROM expenses e
         LEFT JOIN users u ON e.created_by = u.id
         WHERE 1=1
@@ -60,7 +60,7 @@ export const getExpenseById = async (req, res, next) => {
     const userId = req.user.userId;
     
     const result = await pool.query(
-      `SELECT e.*, u.name as salesperson_name, u.username as salesperson_username
+      `SELECT e.*, u.name as salesperson_name, u.username as salesperson_username, u.role as created_by_role
        FROM expenses e
        LEFT JOIN users u ON e.created_by = u.id
        WHERE e.id = $1`,

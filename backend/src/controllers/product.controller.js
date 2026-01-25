@@ -29,23 +29,76 @@ export const getProductById = async (req, res, next) => {
 
 // Create product
 export const createProduct = async (req, res, next) => {
+  const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+    
     const { name, category, selling_price, description, is_active } = req.body;
     
     if (!name || !selling_price) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ success: false, message: 'Name and selling price are required' });
     }
     
-    const result = await pool.query(
+    // Create product
+    const result = await client.query(
       `INSERT INTO products (name, category, selling_price, description, is_active)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
       [name, category || null, selling_price, description || null, is_active !== false]
     );
     
-    res.status(201).json({ success: true, data: result.rows[0], message: 'Product created successfully' });
+    const product = result.rows[0];
+    
+    // Get or create Finished Goods category
+    let finishedGoodsCategoryResult = await client.query(
+      `SELECT id FROM inventory_categories WHERE name = 'Finished Goods' LIMIT 1`
+    );
+    
+    if (finishedGoodsCategoryResult.rows.length === 0) {
+      // Create Finished Goods category if it doesn't exist
+      finishedGoodsCategoryResult = await client.query(
+        `INSERT INTO inventory_categories (name, description) 
+         VALUES ('Finished Goods', 'Finished products ready for sale')
+         RETURNING id`
+      );
+    }
+    
+    const finishedGoodsCategoryId = finishedGoodsCategoryResult.rows[0].id;
+    
+    // Check if inventory item already exists for this product
+    const existingItemResult = await client.query(
+      `SELECT id FROM inventory_items 
+       WHERE name = $1 AND category_id = $2`,
+      [name, finishedGoodsCategoryId]
+    );
+    
+    if (existingItemResult.rows.length === 0) {
+      // Create inventory item in Finished Goods category
+      await client.query(
+        `INSERT INTO inventory_items (name, category_id, unit, quantity, min_quantity, price)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [name, finishedGoodsCategoryId, 'piece', 0, 0, selling_price]
+      );
+    } else {
+      // Update existing inventory item price if needed
+      await client.query(
+        `UPDATE inventory_items SET price = $1 WHERE id = $2`,
+        [selling_price, existingItemResult.rows[0].id]
+      );
+    }
+    
+    await client.query('COMMIT');
+    res.status(201).json({ 
+      success: true, 
+      data: product, 
+      message: 'Product created successfully and added to Finished Goods inventory' 
+    });
   } catch (error) {
+    await client.query('ROLLBACK');
     next(error);
+  } finally {
+    client.release();
   }
 };
 

@@ -25,6 +25,12 @@ router.get('/backup', adminController.downloadBackup);
 router.post('/restore', upload.single('file'), adminController.restoreFromBackup);
 router.post('/reset', adminController.resetSystem);
 
+// End-of-day stock approval
+router.get('/end-of-day/pending', adminController.getPendingEndOfDayRequests);
+router.get('/end-of-day/:id', adminController.getEndOfDayRequestDetailsAdmin);
+router.post('/end-of-day/:id/approve', adminController.approveEndOfDayRequest);
+router.post('/end-of-day/:id/reject', adminController.rejectEndOfDayRequest);
+
 export default router;
 
 

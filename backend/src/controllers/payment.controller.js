@@ -555,16 +555,117 @@ export const createPayment = async (req, res, next) => {
 // Get pending payments
 export const getPendingPayments = async (req, res, next) => {
   try {
+    // Get all sales with pending payments (including cheques and cheque+cash)
+    // A payment is pending if:
+    // 1. Payment status is 'pending', OR
+    // 2. Sale has cheque payments that are not cleared, OR
+    // 3. Sale payment_status is 'pending' or 'partial'
     const result = await pool.query(`
-      SELECT p.*, s.total_amount as sale_total, s.payment_status, b.shop_name as buyer_name
-      FROM payments p
-      LEFT JOIN sales s ON p.sale_id = s.id
+      SELECT DISTINCT
+        s.id as sale_id,
+        s.date as sale_date,
+        s.total_amount as sale_total,
+        s.payment_status as sale_payment_status,
+        b.shop_name as buyer_name,
+        b.contact,
+        b.address,
+        -- Calculate total paid (cash + cleared cheques)
+        COALESCE(
+          (SELECT SUM(p2.cash_amount) + COALESCE(
+            (SELECT SUM(p3.cheque_amount) 
+             FROM payments p3 
+             JOIN cheques c3 ON p3.id = c3.payment_id 
+             WHERE p3.sale_id = s.id AND c3.status = 'cleared' AND p3.status = 'completed'), 
+            0
+          )
+           FROM payments p2 
+           WHERE p2.sale_id = s.id AND p2.status = 'completed'), 
+          0
+        ) as total_paid,
+        -- Calculate pending cheque amount
+        COALESCE(
+          (SELECT SUM(p4.cheque_amount) 
+           FROM payments p4 
+           JOIN cheques c4 ON p4.id = c4.payment_id 
+           WHERE p4.sale_id = s.id AND c4.status = 'pending' AND p4.status = 'completed'), 
+          0
+        ) as pending_cheque_amount,
+        -- Get payment details
+        COALESCE(
+          (SELECT JSON_AGG(
+            JSON_BUILD_OBJECT(
+              'paymentId', p5.id,
+              'paymentDate', p5.payment_date,
+              'cashAmount', p5.cash_amount,
+              'chequeAmount', p5.cheque_amount,
+              'totalAmount', p5.total_amount,
+              'paymentStatus', p5.status,
+              'chequeNumber', c5.cheque_number,
+              'chequeBank', c5.bank_name,
+              'chequeStatus', c5.status,
+              'chequeExpiryDate', c5.return_date,
+              'notes', p5.notes
+            )
+          )
+           FROM payments p5
+           LEFT JOIN cheques c5 ON p5.id = c5.payment_id
+           WHERE p5.sale_id = s.id AND (p5.status = 'pending' OR (p5.status = 'completed' AND (c5.status = 'pending' OR c5.status IS NULL)))
+           ORDER BY p5.payment_date DESC
+          ),
+          '[]'::json
+        ) as payment_details
+      FROM sales s
       LEFT JOIN buyers b ON s.buyer_id = b.id
-      WHERE p.status = 'pending' AND (s.is_reversed = false OR s.is_reversed IS NULL)
-      ORDER BY p.payment_date DESC
+      WHERE (s.is_reversed = false OR s.is_reversed IS NULL)
+        AND s.payment_status IN ('pending', 'partial')
+        AND (
+          -- Has pending payment records
+          EXISTS (
+            SELECT 1 FROM payments p6
+            WHERE p6.sale_id = s.id AND p6.status = 'pending'
+          )
+          OR
+          -- Has pending cheques
+          EXISTS (
+            SELECT 1 FROM payments p7
+            JOIN cheques c7 ON p7.id = c7.payment_id
+            WHERE p7.sale_id = s.id AND c7.status = 'pending' AND p7.status = 'completed'
+          )
+          OR
+          -- Sale is pending/partial with no payment records (ongoing)
+          NOT EXISTS (
+            SELECT 1 FROM payments p8
+            WHERE p8.sale_id = s.id AND p8.status = 'completed'
+          )
+        )
+      ORDER BY s.date DESC, s.id DESC
     `);
-    res.json({ success: true, data: result.rows });
+    
+    // Format the response
+    const formattedData = result.rows.map(row => {
+      const saleTotal = parseFloat(row.sale_total || 0);
+      const totalPaid = parseFloat(row.total_paid || 0);
+      const pendingCheque = parseFloat(row.pending_cheque_amount || 0);
+      const remainingBalance = Math.max(0, saleTotal - totalPaid - pendingCheque);
+      
+      return {
+        saleId: row.sale_id,
+        saleDate: row.sale_date,
+        saleTotal: saleTotal,
+        salePaymentStatus: row.sale_payment_status,
+        buyerName: row.buyer_name,
+        contact: row.contact,
+        address: row.address,
+        totalPaid: totalPaid,
+        pendingChequeAmount: pendingCheque,
+        remainingBalance: remainingBalance,
+        paymentDetails: Array.isArray(row.payment_details) ? row.payment_details : []
+      };
+    });
+    
+    res.json({ success: true, data: formattedData });
   } catch (error) {
+    console.error('Error getting pending payments:', error);
     next(error);
   }
 };
@@ -597,7 +698,7 @@ export const getChequeExpiryAlerts = async (req, res, next) => {
         AND c.return_date IS NOT NULL
         AND c.return_date >= CURRENT_DATE
         AND c.return_date <= CURRENT_DATE + INTERVAL '2 days'
-        AND (s.is_reversed = false OR s.is_reversed IS NULL)
+        AND s.is_reversed = false
       ORDER BY c.return_date ASC
     `);
     
@@ -755,7 +856,7 @@ export const getAllCheques = async (req, res, next) => {
       JOIN sales s ON p.sale_id = s.id
       LEFT JOIN buyers b ON s.buyer_id = b.id
       LEFT JOIN users u ON s.salesperson_id = u.id
-      WHERE (s.is_reversed = false OR s.is_reversed IS NULL)
+      WHERE s.is_reversed = false
     `;
     const params = [];
     
@@ -807,11 +908,12 @@ export const getOngoingPendingPayments = async (req, res, next) => {
   try {
     const userId = req.user.userId;
     
-    // Get sales with payment_status = 'pending' or 'partial' that belong to this salesperson
-    // AND have at least one payment record marked as 'ongoing' in notes
-    // AND have remaining balance > 0 (not fully paid)
+    // Get all sales with pending payments (including cheques and cheque+cash)
+    // A payment is pending if:
+    // 1. Sale payment_status is 'pending' or 'partial', AND
+    // 2. Has pending payment records OR pending cheques OR no payment records (ongoing)
     const result = await pool.query(`
-      SELECT 
+      SELECT
         s.id as sale_id,
         s.date as sale_date,
         s.total_amount,
@@ -820,53 +922,120 @@ export const getOngoingPendingPayments = async (req, res, next) => {
         b.shop_name,
         b.contact,
         b.address,
+        -- Calculate total paid (cash + cleared cheques)
         COALESCE(
-          (SELECT SUM(p.cash_amount) + COALESCE(
-            (SELECT SUM(p2.cheque_amount) 
-             FROM payments p2 
-             JOIN cheques c2 ON p2.id = c2.payment_id 
-             WHERE p2.sale_id = s.id AND c2.status = 'cleared' AND p2.status = 'completed'), 
+          (SELECT SUM(p2.cash_amount) + COALESCE(
+            (SELECT SUM(p3.cheque_amount) 
+             FROM payments p3 
+             JOIN cheques c3 ON p3.id = c3.payment_id 
+             WHERE p3.sale_id = s.id AND c3.status = 'cleared' AND p3.status = 'completed'), 
             0
           )
-           FROM payments p 
-           WHERE p.sale_id = s.id AND p.status = 'completed'), 
+           FROM payments p2 
+           WHERE p2.sale_id = s.id AND p2.status = 'completed'), 
           0
-        ) as total_paid
+        ) as total_paid,
+        -- Calculate pending cheque amount
+        COALESCE(
+          (SELECT SUM(p4.cheque_amount) 
+           FROM payments p4 
+           JOIN cheques c4 ON p4.id = c4.payment_id 
+           WHERE p4.sale_id = s.id AND c4.status = 'pending' AND p4.status = 'completed'), 
+          0
+        ) as pending_cheque_amount,
+        -- Get payment details
+        COALESCE(
+          (SELECT JSON_AGG(
+            JSON_BUILD_OBJECT(
+              'paymentId', p5.id,
+              'paymentDate', p5.payment_date,
+              'cashAmount', p5.cash_amount,
+              'chequeAmount', p5.cheque_amount,
+              'totalAmount', p5.total_amount,
+              'paymentStatus', p5.status,
+              'paymentMethod', CASE 
+                WHEN p5.notes IS NOT NULL AND p5.notes::text LIKE '%"paymentMethod":"ongoing"%' THEN 'ongoing'
+                WHEN p5.cheque_amount > 0 AND p5.cash_amount > 0 THEN 'split'
+                WHEN p5.cheque_amount > 0 THEN 'cheque'
+                ELSE 'cash'
+              END,
+              'chequeNumber', c5.cheque_number,
+              'chequeBank', c5.bank_name,
+              'chequeStatus', c5.status,
+              'chequeExpiryDate', c5.return_date,
+              'notes', p5.notes
+            ) ORDER BY p5.payment_date DESC
+          )
+           FROM payments p5
+           LEFT JOIN cheques c5 ON p5.id = c5.payment_id
+           WHERE p5.sale_id = s.id AND (
+             p5.status = 'pending' 
+             OR (p5.status = 'completed' AND (c5.status = 'pending' OR c5.status IS NULL))
+             OR (p5.notes IS NOT NULL AND p5.notes::text LIKE '%"paymentMethod":"ongoing"%')
+           )
+          ),
+          '[]'::json
+        ) as payment_details
       FROM sales s
       LEFT JOIN buyers b ON s.buyer_id = b.id
       WHERE s.salesperson_id = $1 
+        AND (s.is_reversed = false OR s.is_reversed IS NULL)
         AND s.payment_status IN ('pending', 'partial')
-        AND EXISTS (
-          SELECT 1 
-          FROM payments p 
-          WHERE p.sale_id = s.id 
-            AND p.status = 'completed'
-            AND p.notes IS NOT NULL 
-            AND p.notes::text LIKE '%"paymentMethod":"ongoing"%'
+        AND (
+          -- Has pending payment records
+          EXISTS (
+            SELECT 1 FROM payments p6
+            WHERE p6.sale_id = s.id AND p6.status = 'pending'
+          )
+          OR
+          -- Has pending cheques
+          EXISTS (
+            SELECT 1 FROM payments p7
+            JOIN cheques c7 ON p7.id = c7.payment_id
+            WHERE p7.sale_id = s.id AND c7.status = 'pending' AND p7.status = 'completed'
+          )
+          OR
+          -- Sale is pending/partial with no payment records (ongoing)
+          NOT EXISTS (
+            SELECT 1 FROM payments p8
+            WHERE p8.sale_id = s.id AND p8.status = 'completed'
+          )
+          OR
+          -- Has ongoing payment in notes
+          EXISTS (
+            SELECT 1 FROM payments p9
+            WHERE p9.sale_id = s.id 
+              AND p9.status = 'completed'
+              AND p9.notes IS NOT NULL 
+              AND p9.notes::text LIKE '%"paymentMethod":"ongoing"%'
+          )
         )
-      ORDER BY s.date DESC
+      ORDER BY s.date DESC, s.id DESC
     `, [userId]);
     
     const formattedData = result.rows
       .map(row => {
         const totalAmount = parseFloat(row.total_amount || 0);
         const totalPaid = parseFloat(row.total_paid || 0);
-        const remainingBalance = Math.max(0, totalAmount - totalPaid);
+        const pendingCheque = parseFloat(row.pending_cheque_amount || 0);
+        const remainingBalance = Math.max(0, totalAmount - totalPaid - pendingCheque);
         
         return {
           saleId: row.sale_id,
           saleDate: row.sale_date,
           totalAmount,
           totalPaid,
+          pendingChequeAmount: pendingCheque,
           remainingBalance,
           paymentStatus: row.payment_status,
           buyerId: row.buyer_id,
           shopName: row.shop_name,
           contact: row.contact,
-          address: row.address
+          address: row.address,
+          paymentDetails: Array.isArray(row.payment_details) ? row.payment_details : []
         };
       })
-      .filter(item => item.remainingBalance > 0.01); // Filter out fully paid sales (allow for small rounding differences)
+      .filter(item => item.remainingBalance > 0.01 || item.pendingChequeAmount > 0.01); // Include sales with pending cheques even if cash is fully paid
     
     res.json({ success: true, data: formattedData });
   } catch (error) {

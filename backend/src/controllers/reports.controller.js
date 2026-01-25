@@ -81,6 +81,7 @@ async function getReportData(reportKey, startDate, endDate) {
     }
 
     case 'sales': {
+      // Get all sales details
       const details = await pool.query(
         `SELECT
            invoice_no,
@@ -91,16 +92,23 @@ async function getReportData(reportKey, startDate, endDate) {
            unit_price,
            line_amount,
            payment_status,
-           payment_type
+           payment_type,
+           sold_by,
+           salesperson_name
          FROM v_report_sales_details
          WHERE date BETWEEN $1 AND $2
          ORDER BY date ASC, invoice_no ASC, product_name ASC`,
         [startDate, endDate]
       );
 
+      // Separate admin and salesperson sales (handle case where sold_by might not exist yet)
+      const adminSales = details.rows.filter(row => (row.sold_by || row.salesperson_role) === 'ADMIN' || row.salesperson_role === 'ADMIN');
+      const salespersonSales = details.rows.filter(row => (row.sold_by || row.salesperson_role) !== 'ADMIN' && row.salesperson_role !== 'ADMIN');
+
+      // Summary for all sales
       const summary = await pool.query(
         `WITH base AS (
-           SELECT DISTINCT sale_id, invoice_total, total_paid, outstanding
+           SELECT DISTINCT sale_id, invoice_total, total_paid, outstanding, sold_by
            FROM v_report_sales_details
            WHERE date BETWEEN $1 AND $2
          ),
@@ -113,6 +121,38 @@ async function getReportData(reportKey, startDate, endDate) {
            COALESCE(SUM(invoice_total), 0)::numeric(12,2) AS total_sales,
            (SELECT total_returns FROM ret) AS total_returns,
            (COALESCE(SUM(invoice_total), 0) - (SELECT total_returns FROM ret))::numeric(12,2) AS net_sales,
+           COALESCE(SUM(total_paid), 0)::numeric(12,2) AS total_payments_received,
+           COALESCE(SUM(outstanding), 0)::numeric(12,2) AS outstanding,
+           COUNT(*)::int AS invoice_count
+         FROM base`,
+        [startDate, endDate]
+      );
+
+      // Admin sales summary
+      const adminSummary = await pool.query(
+        `WITH base AS (
+           SELECT DISTINCT sale_id, invoice_total, total_paid, outstanding
+           FROM v_report_sales_details
+           WHERE date BETWEEN $1 AND $2 AND (sold_by = 'ADMIN' OR salesperson_role = 'ADMIN')
+         )
+         SELECT
+           COALESCE(SUM(invoice_total), 0)::numeric(12,2) AS total_sales,
+           COALESCE(SUM(total_paid), 0)::numeric(12,2) AS total_payments_received,
+           COALESCE(SUM(outstanding), 0)::numeric(12,2) AS outstanding,
+           COUNT(*)::int AS invoice_count
+         FROM base`,
+        [startDate, endDate]
+      );
+
+      // Salesperson sales summary
+      const salespersonSummary = await pool.query(
+        `WITH base AS (
+           SELECT DISTINCT sale_id, invoice_total, total_paid, outstanding
+           FROM v_report_sales_details
+           WHERE date BETWEEN $1 AND $2 AND (sold_by = 'SALESPERSON' OR salesperson_role != 'ADMIN')
+         )
+         SELECT
+           COALESCE(SUM(invoice_total), 0)::numeric(12,2) AS total_sales,
            COALESCE(SUM(total_paid), 0)::numeric(12,2) AS total_payments_received,
            COALESCE(SUM(outstanding), 0)::numeric(12,2) AS outstanding,
            COUNT(*)::int AS invoice_count
@@ -145,10 +185,20 @@ async function getReportData(reportKey, startDate, endDate) {
           { key: 'unit_price', label: 'Unit Price' },
           { key: 'line_amount', label: 'Amount' },
           { key: 'payment_type', label: 'Payment Type' },
-          { key: 'payment_status', label: 'Payment Status' }
+          { key: 'payment_status', label: 'Payment Status' },
+          { key: 'sold_by', label: 'Sold By' },
+          { key: 'salesperson_name', label: 'Salesperson' }
         ],
         details: details.rows,
         summary: summary.rows[0] || {},
+        adminSales: {
+          details: adminSales,
+          summary: adminSummary.rows[0] || {}
+        },
+        salespersonSales: {
+          details: salespersonSales,
+          summary: salespersonSummary.rows[0] || {}
+        },
         reconciliation: rec.rows[0] || {}
       };
     }
@@ -991,7 +1041,7 @@ async function exportSalesShopWiseExcel(req, res, next, range) {
       FROM sales s
       LEFT JOIN buyers b ON s.buyer_id = b.id
       LEFT JOIN users u ON s.salesperson_id = u.id
-      WHERE (s.is_reversed = false OR s.is_reversed IS NULL)
+      WHERE s.is_reversed = false
         AND s.date BETWEEN $1 AND $2
       ORDER BY b.shop_name, s.date DESC, s.created_at DESC
     `, [range.startDate, range.endDate]);

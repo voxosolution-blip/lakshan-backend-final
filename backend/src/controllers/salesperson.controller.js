@@ -351,10 +351,10 @@ export const createMobileSale = async (req, res, next) => {
       totalAmount += item.quantity * item.price;
     }
 
-    // Create sale record
+    // Create sale record with actual timestamp (not midnight)
     const saleResult = await client.query(
-      `INSERT INTO sales (buyer_id, salesperson_id, date, total_amount, payment_status, notes)
-       VALUES ($1, $2, CURRENT_DATE, $3, $4, $5)
+      `INSERT INTO sales (buyer_id, salesperson_id, date, total_amount, payment_status, notes, created_at)
+       VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, CURRENT_TIMESTAMP)
        RETURNING *`,
       [
         shopId,
@@ -533,6 +533,216 @@ export const getShopSales = async (req, res, next) => {
     );
 
     res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================================
+// END OF DAY STOCK UPDATE
+// ============================================
+
+// Submit end-of-day stock update request
+export const submitEndOfDayRequest = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const salespersonId = req.user.userId;
+    const today = new Date().toISOString().split('T')[0];
+    
+    await client.query('BEGIN');
+    
+    // Check if request already exists for today
+    const existingRequest = await client.query(
+      `SELECT id, status FROM end_of_day_stock_requests 
+       WHERE salesperson_id = $1 AND request_date = $2`,
+      [salespersonId, today]
+    );
+    
+    if (existingRequest.rows.length > 0) {
+      const existing = existingRequest.rows[0];
+      if (existing.status === 'pending') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          message: 'You already have a pending request for today'
+        });
+      }
+      if (existing.status === 'approved') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          message: 'Your request for today has already been approved'
+        });
+      }
+    }
+    
+    // Get remaining stock for this salesperson
+    const remainingStockResult = await client.query(`
+      SELECT 
+        sa.product_id,
+        pr.name as product_name,
+        pr.selling_price,
+        'piece' as unit,
+        SUM(sa.quantity_allocated) as total_allocated,
+        COALESCE(SUM(sold.sold_quantity), 0) as sold_quantity,
+        COALESCE(SUM(returned.returned_quantity), 0) as returned_quantity,
+        GREATEST(0, SUM(sa.quantity_allocated) - COALESCE(SUM(sold.sold_quantity), 0) + COALESCE(SUM(returned.returned_quantity), 0)) as remaining_quantity
+      FROM salesperson_allocations sa
+      JOIN products pr ON sa.product_id = pr.id
+      LEFT JOIN (
+        SELECT 
+          si.product_id,
+          SUM(si.quantity) as sold_quantity
+        FROM sale_items si
+        JOIN sales s ON si.sale_id = s.id
+        WHERE s.salesperson_id = $1 AND si.is_return = false
+        GROUP BY si.product_id
+      ) sold ON sold.product_id = sa.product_id
+      LEFT JOIN (
+        SELECT 
+          si.product_id,
+          SUM(si.quantity) as returned_quantity
+        FROM sale_items si
+        JOIN sales s ON si.sale_id = s.id
+        WHERE s.salesperson_id = $1 AND si.is_return = true
+        GROUP BY si.product_id
+      ) returned ON returned.product_id = sa.product_id
+      WHERE sa.salesperson_id = $1 
+        AND sa.status = 'active'
+        AND pr.is_active = true
+      GROUP BY sa.product_id, pr.name, pr.selling_price
+      HAVING GREATEST(0, SUM(sa.quantity_allocated) - COALESCE(SUM(sold.sold_quantity), 0) + COALESCE(SUM(returned.returned_quantity), 0)) > 0
+      ORDER BY pr.name
+    `, [salespersonId]);
+    
+    if (remainingStockResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: 'No remaining stock to update'
+      });
+    }
+    
+    // Create request
+    const requestResult = await client.query(
+      `INSERT INTO end_of_day_stock_requests (salesperson_id, request_date, status)
+       VALUES ($1, $2, 'pending')
+       ON CONFLICT (salesperson_id, request_date) 
+       DO UPDATE SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [salespersonId, today]
+    );
+    
+    const requestId = requestResult.rows[0].id;
+    
+    // Delete old items if updating existing request
+    await client.query(
+      `DELETE FROM end_of_day_stock_items WHERE request_id = $1`,
+      [requestId]
+    );
+    
+    // Insert stock items
+    for (const item of remainingStockResult.rows) {
+      await client.query(
+        `INSERT INTO end_of_day_stock_items (request_id, product_id, product_name, remaining_quantity, unit)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          requestId,
+          item.product_id,
+          item.product_name,
+          item.remaining_quantity,
+          item.unit
+        ]
+      );
+    }
+    
+    await client.query('COMMIT');
+    
+    res.status(201).json({
+      success: true,
+      message: 'End-of-day stock update request submitted successfully',
+      data: {
+        requestId: requestId,
+        itemsCount: remainingStockResult.rows.length,
+        totalItems: remainingStockResult.rows.reduce((sum, item) => sum + parseFloat(item.remaining_quantity), 0)
+      }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error submitting end-of-day request:', error);
+    next(error);
+  } finally {
+    client.release();
+  }
+};
+
+// Get my end-of-day requests
+export const getMyEndOfDayRequests = async (req, res, next) => {
+  try {
+    const salespersonId = req.user.userId;
+    
+    const result = await pool.query(
+      `SELECT 
+        r.id,
+        r.request_date,
+        r.status,
+        r.approved_by,
+        r.approved_at,
+        r.notes,
+        r.created_at,
+        u.name as approved_by_name,
+        COUNT(i.id) as items_count,
+        SUM(i.remaining_quantity) as total_quantity
+       FROM end_of_day_stock_requests r
+       LEFT JOIN users u ON r.approved_by = u.id
+       LEFT JOIN end_of_day_stock_items i ON r.id = i.request_id
+       WHERE r.salesperson_id = $1
+       GROUP BY r.id, r.request_date, r.status, r.approved_by, r.approved_at, r.notes, r.created_at, u.name
+       ORDER BY r.request_date DESC, r.created_at DESC`,
+      [salespersonId]
+    );
+    
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get end-of-day request details
+export const getEndOfDayRequestDetails = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const salespersonId = req.user.userId;
+    
+    // Get request
+    const requestResult = await pool.query(
+      `SELECT r.*, u.name as approved_by_name
+       FROM end_of_day_stock_requests r
+       LEFT JOIN users u ON r.approved_by = u.id
+       WHERE r.id = $1 AND r.salesperson_id = $2`,
+      [id, salespersonId]
+    );
+    
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+    
+    // Get items
+    const itemsResult = await pool.query(
+      `SELECT * FROM end_of_day_stock_items WHERE request_id = $1 ORDER BY product_name`,
+      [id]
+    );
+    
+    res.json({
+      success: true,
+      data: {
+        ...requestResult.rows[0],
+        items: itemsResult.rows
+      }
+    });
   } catch (error) {
     next(error);
   }

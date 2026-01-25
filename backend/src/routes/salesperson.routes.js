@@ -10,7 +10,10 @@ import {
   updateShopLocation,
   getMyInventory,
   createMobileSale,
-  getShopSales
+  getShopSales,
+  submitEndOfDayRequest,
+  getMyEndOfDayRequests,
+  getEndOfDayRequestDetails
 } from '../controllers/salesperson.controller.js';
 
 const router = express.Router();
@@ -42,5 +45,12 @@ router.get('/inventory', authorize(['SALESPERSON']), getMyInventory);
 // MOBILE SALES
 // ============================================
 router.post('/sales', authorize(['SALESPERSON']), createMobileSale);
+
+// ============================================
+// END OF DAY STOCK UPDATE
+// ============================================
+router.post('/end-of-day', authorize(['SALESPERSON']), submitEndOfDayRequest);
+router.get('/end-of-day', authorize(['SALESPERSON']), getMyEndOfDayRequests);
+router.get('/end-of-day/:id', authorize(['SALESPERSON']), getEndOfDayRequestDetails);
 
 export default router;

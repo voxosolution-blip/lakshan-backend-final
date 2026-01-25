@@ -79,34 +79,6 @@ export const getProductionCapacity = async (req, res, next) => {
 // Get all productions
 export const getAllProductions = async (req, res, next) => {
   try {
-    // Check if batch column exists
-    const columnCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.columns 
-        WHERE table_name = 'productions' AND column_name = 'batch'
-      )
-    `);
-    
-    // If batch column doesn't exist, select without it
-    if (!columnCheck.rows[0].exists) {
-      const result = await pool.query(`
-        SELECT 
-          p.id,
-          p.date,
-          NULL as batch,
-          p.quantity_produced,
-          p.notes,
-          p.created_at,
-          pr.id as product_id,
-          pr.name as product_name,
-          pr.category as product_category
-        FROM productions p
-        JOIN products pr ON p.product_id = pr.id
-        ORDER BY p.date DESC, p.created_at DESC
-      `);
-      return res.json({ success: true, data: result.rows });
-    }
-    
     const result = await pool.query(`
       SELECT 
         p.id,
@@ -163,29 +135,6 @@ export const createProduction = async (req, res, next) => {
         success: false, 
         message: 'Product ID and quantity produced are required' 
       });
-    }
-    
-    // Check if batch number function and batch column exist BEFORE starting transaction
-    let batchFunctionExists = false;
-    let batchColumnExists = false;
-    try {
-      const funcCheck = await pool.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.routines 
-          WHERE routine_name = 'generate_batch_number'
-        )
-      `);
-      batchFunctionExists = funcCheck.rows[0].exists;
-      
-      const columnCheck = await pool.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.columns 
-          WHERE table_name = 'productions' AND column_name = 'batch'
-        )
-      `);
-      batchColumnExists = columnCheck.rows[0].exists;
-    } catch (checkError) {
-      console.warn('Could not check for batch function/column:', checkError.message);
     }
     
     await client.query('BEGIN');
@@ -310,7 +259,7 @@ export const createProduction = async (req, res, next) => {
       throw new Error(`Insufficient stock: ${errorMsg}`);
     }
     
-    // Generate production date and batch number
+    // Generate production date
     const productionDate = date || new Date().toISOString().split('T')[0];
     
     // Get or create finished goods inventory item
@@ -343,106 +292,14 @@ export const createProduction = async (req, res, next) => {
       finishedGoodsItemId = newItemResult.rows[0].id;
     }
     
-    // Generate batch number using database function (with explicit type casting)
-    // Fallback to manual generation if function doesn't exist
-    let batchNumber;
-    const datePart = productionDate; // Already in YYYY-MM-DD format
-    
-    if (batchFunctionExists) {
-      try {
-        const batchNumberResult = await client.query(
-          `SELECT generate_batch_number($1::UUID, $2::DATE) as batch_number`,
-          [finishedGoodsItemId, productionDate]
-        );
-        batchNumber = batchNumberResult.rows[0].batch_number;
-      } catch (funcError) {
-        // If function call fails in transaction, rollback and use fallback
-        console.warn('generate_batch_number function call failed, rolling back and using fallback:', funcError.message);
-        await client.query('ROLLBACK');
-        batchFunctionExists = false;
-      }
-    }
-    
-    // Fallback: Generate batch number manually if function doesn't exist or failed
-    if (!batchFunctionExists) {
-      // If transaction was rolled back, restart it
-      try {
-        await client.query('BEGIN');
-      } catch (beginError) {
-        // Transaction might already be active or aborted
-        // Ignore error and continue
-      }
-      
-      let seqNum = 1;
-      
-      // Use separate connection (pool.query) for fallback checks to avoid transaction issues
-      // Try to get max sequence number from inventory_batches if table exists
-      try {
-        const tableCheck = await pool.query(`
-          SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_name = 'inventory_batches'
-          )
-        `);
-        
-        if (tableCheck.rows[0].exists) {
-          const maxBatchResult = await pool.query(
-            `SELECT COALESCE(MAX(CAST(SUBSTRING(batch_number FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
-             FROM inventory_batches
-             WHERE inventory_item_id = $1 AND production_date = $2`,
-            [finishedGoodsItemId, productionDate]
-          );
-          seqNum = parseInt(maxBatchResult.rows[0]?.max_seq || 0) + 1;
-        }
-      } catch (batchError) {
-        console.warn('Could not query inventory_batches table:', batchError.message);
-      }
-      
-      // Also check productions table for existing batches if batch column exists
-      try {
-        const columnCheck = await pool.query(`
-          SELECT EXISTS (
-            SELECT FROM information_schema.columns 
-            WHERE table_name = 'productions' AND column_name = 'batch'
-          )
-        `);
-        
-        if (columnCheck.rows[0].exists) {
-          const maxProdBatchResult = await pool.query(
-            `SELECT COALESCE(MAX(CAST(SUBSTRING(batch FROM '[0-9]+$') AS INTEGER)), 0) as max_seq
-             FROM productions
-             WHERE date = $1 AND batch IS NOT NULL`,
-            [productionDate]
-          );
-          const prodSeq = parseInt(maxProdBatchResult.rows[0]?.max_seq || 0) + 1;
-          seqNum = Math.max(seqNum, prodSeq);
-        }
-      } catch (prodError) {
-        console.warn('Could not query productions.batch column:', prodError.message);
-      }
-      
-      // Format: YYYY-MM-DD-001, YYYY-MM-DD-002, etc.
-      batchNumber = `${datePart}-${String(seqNum).padStart(3, '0')}`;
-    }
-    
     // Create production record FIRST (before deducting inventory)
     // This ensures milk calculation includes this production
-    let productionResult;
-    if (batchColumnExists) {
-      productionResult = await client.query(
-        `INSERT INTO productions (product_id, quantity_produced, date, batch, notes, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING *`,
-        [productId, quantity, productionDate, batchNumber, notes || null, userId]
-      );
-    } else {
-      productionResult = await client.query(
-        `INSERT INTO productions (product_id, quantity_produced, date, notes, created_by)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING *`,
-        [productId, quantity, productionDate, notes || null, userId]
-      );
-    }
+    const productionResult = await client.query(
+      `INSERT INTO productions (product_id, quantity_produced, date, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [productId, quantity, productionDate, notes || null, userId]
+    );
     const production = productionResult.rows[0];
     
     // NOW deduct inventory items based on recipe (after production is created)
@@ -522,52 +379,14 @@ export const createProduction = async (req, res, next) => {
       }
     }
     
-    // Create inventory batch record for finished goods (only if table exists)
-    const inventoryBatchesTableExists = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'inventory_batches'
-      )
-    `);
-    
-    if (inventoryBatchesTableExists.rows[0].exists) {
-      await client.query(
-        `INSERT INTO inventory_batches (inventory_item_id, production_id, batch_number, quantity, production_date, status)
-         VALUES ($1, $2, $3, $4, $5, 'available')
-         ON CONFLICT (inventory_item_id, batch_number) DO UPDATE
-         SET quantity = inventory_batches.quantity + EXCLUDED.quantity,
-             status = 'available'`,
-        [finishedGoodsItemId, production.id, batchNumber, quantity, productionDate]
-      );
-      
-      // Recalculate finished goods inventory quantity from all available batches
-      // This ensures accuracy when there are multiple productions or allocations
-      const totalAvailableResult = await client.query(
-        `SELECT COALESCE(SUM(quantity), 0) as total_available
-         FROM inventory_batches
-         WHERE inventory_item_id = $1 AND status = 'available'`,
-        [finishedGoodsItemId]
-      );
-      
-      const totalAvailable = parseFloat(totalAvailableResult.rows[0].total_available || 0);
-      
-      await client.query(
-        `UPDATE inventory_items 
-         SET quantity = $1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $2`,
-        [totalAvailable, finishedGoodsItemId]
-      );
-    } else {
-      // If inventory_batches table doesn't exist, just update inventory_items quantity directly
-      await client.query(
-        `UPDATE inventory_items 
-         SET quantity = quantity + $1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $2`,
-        [quantity, finishedGoodsItemId]
-      );
-    }
+    // Directly update finished goods inventory (no batch tracking)
+    await client.query(
+      `UPDATE inventory_items 
+       SET quantity = quantity + $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [quantity, finishedGoodsItemId]
+    );
     
     await client.query('COMMIT');
     
@@ -576,10 +395,9 @@ export const createProduction = async (req, res, next) => {
       data: {
         ...production,
         product: product,
-        batchNumber: batchNumber,
         finishedGoodsItemId: finishedGoodsItemId
       },
-      message: `Production created successfully. Batch: ${batchNumber}. Inventory deducted and finished goods added.` 
+      message: `Production created successfully. Inventory deducted and finished goods added to inventory.` 
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -590,68 +408,12 @@ export const createProduction = async (req, res, next) => {
   }
 };
 
-// Create salesperson allocation from production or inventory
+// Create salesperson allocation from inventory only (no production batches)
 export const createSalesAllocation = async (req, res, next) => {
   const client = await pool.connect();
   try {
-    const { productionId, inventoryItemId, productId, salespersonId, quantityAllocated, notes, allocations } = req.body;
+    const { inventoryItemId, productId, salespersonId, quantityAllocated, notes, allocations } = req.body;
     const userId = req.user?.userId;
-    
-    // Check if inventory_batches table exists BEFORE starting transaction
-    const inventoryBatchesCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'inventory_batches'
-      )
-    `);
-    const inventoryBatchesExists = inventoryBatchesCheck.rows[0].exists;
-    
-    // Check if salesperson_allocations table exists, create it if it doesn't
-    const salesAllocationsCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'salesperson_allocations'
-      )
-    `);
-    let salesAllocationsExists = salesAllocationsCheck.rows[0].exists;
-    
-    if (!salesAllocationsExists) {
-      // Try to create the table automatically
-      try {
-        await pool.query(`
-          CREATE TABLE IF NOT EXISTS salesperson_allocations (
-            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-            production_id UUID NOT NULL REFERENCES productions(id) ON DELETE CASCADE,
-            product_id UUID NOT NULL REFERENCES products(id),
-            salesperson_id UUID NOT NULL REFERENCES users(id),
-            batch_number VARCHAR(100) NOT NULL,
-            quantity_allocated DECIMAL(10, 2) NOT NULL CHECK (quantity_allocated > 0),
-            allocation_date DATE NOT NULL DEFAULT CURRENT_DATE,
-            status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'completed', 'returned', 'cancelled')),
-            notes TEXT,
-            allocated_by UUID REFERENCES users(id),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `);
-        
-        // Create indexes
-        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_production ON salesperson_allocations(production_id)`);
-        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_product ON salesperson_allocations(product_id)`);
-        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_salesperson ON salesperson_allocations(salesperson_id)`);
-        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_date ON salesperson_allocations(allocation_date)`);
-        await pool.query(`CREATE INDEX IF NOT EXISTS idx_allocations_status ON salesperson_allocations(status)`);
-        
-        salesAllocationsExists = true;
-        console.log('✅ Created salesperson_allocations table automatically');
-      } catch (createError) {
-        console.error('Failed to create salesperson_allocations table:', createError.message);
-        return res.status(500).json({ 
-          success: false, 
-          message: 'Allocations feature requires database setup. Please run migrations first.' 
-        });
-      }
-    }
     
     // Support both single allocation and bulk allocations
     if (allocations && Array.isArray(allocations)) {
@@ -660,145 +422,56 @@ export const createSalesAllocation = async (req, res, next) => {
       
       const results = [];
       for (const allocation of allocations) {
-        const { productionId: prodId, productId: prodProdId, salespersonId: salesId, quantity } = allocation;
+        const { inventoryItemId: invItemId, productId: prodProdId, salespersonId: salesId, quantity } = allocation;
         
-        if (!prodId || !prodProdId || !salesId || !quantity || quantity <= 0) {
-          throw new Error('Invalid allocation data: Production ID, Product ID, Salesperson ID, and quantity are required');
+        if (!invItemId || !prodProdId || !salesId || !quantity || quantity <= 0) {
+          throw new Error('Invalid allocation data: Inventory Item ID, Product ID, Salesperson ID, and quantity are required');
         }
         
-        // Get production details
-        const productionResult = await client.query(
-          `SELECT p.*, pr.name as product_name, p.batch
-           FROM productions p
-           JOIN products pr ON p.product_id = pr.id
-           WHERE p.id = $1`,
-          [prodId]
-        );
-        
-        if (productionResult.rows.length === 0) {
-          throw new Error(`Production ${prodId} not found`);
-        }
-        
-        const production = productionResult.rows[0];
-        const totalProduced = parseFloat(production.quantity_produced);
-        
-        // Get already allocated quantity for this production
-        const allocatedResult = await client.query(
-          `SELECT COALESCE(SUM(quantity_allocated), 0) as total_allocated
-           FROM salesperson_allocations
-           WHERE production_id = $1 AND status = 'active'`,
-          [prodId]
-        );
-        
-        const alreadyAllocated = parseFloat(allocatedResult.rows[0].total_allocated || 0);
-        
-        // Get available inventory stock for this product (from previous days' remaining allocations)
+        // Get inventory item and product details
         const inventoryResult = await client.query(
-          `SELECT COALESCE(i.quantity, 0) as inventory_stock
+          `SELECT i.*, pr.name as product_name, pr.id as product_id
            FROM inventory_items i
            JOIN inventory_categories c ON i.category_id = c.id
-           WHERE i.name = $1 AND c.name = 'Finished Goods'
+           JOIN products pr ON i.name = pr.name
+           WHERE i.id = $1 AND pr.id = $2 AND c.name = 'Finished Goods'
            LIMIT 1`,
-          [production.product_name]
+          [invItemId, prodProdId]
         );
         
-        const inventoryStock = parseFloat(inventoryResult.rows[0]?.inventory_stock || 0);
-        
-        // Available = Today's production remaining + Inventory stock from previous days
-        const productionAvailable = totalProduced - alreadyAllocated;
-        const totalAvailable = productionAvailable + inventoryStock;
-        const qty = parseFloat(quantity);
-        
-        if (qty > totalAvailable) {
-          throw new Error(`Insufficient quantity for ${production.product_name}. Available: ${totalAvailable.toFixed(2)} (Production: ${productionAvailable.toFixed(2)}, Inventory: ${inventoryStock.toFixed(2)}), Requested: ${qty}`);
+        if (inventoryResult.rows.length === 0) {
+          throw new Error(`Inventory item not found or does not match product`);
         }
         
-        // If allocating from inventory, reduce inventory first
-        let remainingToAllocate = qty;
-        if (inventoryStock > 0 && productionAvailable < qty) {
-          const fromInventory = Math.min(inventoryStock, qty - productionAvailable);
-          remainingToAllocate = qty - fromInventory;
-          
-          // Reduce inventory
-          await client.query(
-            `UPDATE inventory_items 
-             SET quantity = GREATEST(0, quantity - $1),
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = (SELECT i.id FROM inventory_items i
-                         JOIN inventory_categories c ON i.category_id = c.id
-                         WHERE i.name = $2 AND c.name = 'Finished Goods'
-                         LIMIT 1)`,
-            [fromInventory, production.product_name]
-          );
-          
-          // Update inventory batches (reduce from available batches)
-          // First get the batch to update
-          const batchToUpdateResult = await client.query(
-            `SELECT ib.id, ib.quantity
-             FROM inventory_batches ib
-             JOIN inventory_items i ON ib.inventory_item_id = i.id
-             JOIN inventory_categories c ON i.category_id = c.id
-             WHERE i.name = $1 AND c.name = 'Finished Goods'
-               AND ib.status = 'available'
-               AND ib.quantity > 0
-             ORDER BY ib.production_date ASC
-             LIMIT 1`,
-            [production.product_name]
-          );
-          
-          if (batchToUpdateResult.rows.length > 0) {
-            const batch = batchToUpdateResult.rows[0];
-            const newQuantity = parseFloat(batch.quantity) - fromInventory;
-            
-            if (newQuantity <= 0) {
-              // Delete batch if quantity would become 0 (constraint requires quantity > 0)
-              await client.query(`DELETE FROM inventory_batches WHERE id = $1`, [batch.id]);
-            } else {
-              // Update batch with new quantity
-              await client.query(
-                `UPDATE inventory_batches
-                 SET quantity = $1, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = $2`,
-                [newQuantity, batch.id]
-              );
-            }
-          }
-        }
-        
-        // Create allocation record with full quantity
-        // Note: If inventory was used, the allocation still shows full qty but production_id links to today's production
-        // Handle batch_number - use production.batch if available, otherwise generate one
-        const batchNum = production.batch || `${production.date || new Date().toISOString().split('T')[0]}-001`;
-        const allocationResult = await client.query(
-          `INSERT INTO salesperson_allocations (production_id, product_id, salesperson_id, batch_number, quantity_allocated, allocation_date, notes, allocated_by)
-           VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7)
-           RETURNING *`,
-          [prodId, prodProdId, salesId, batchNum, qty, notes || null, userId]
-        );
-        
-        // Update inventory batch status - only if table exists
-        if (inventoryBatchesExists) {
-          await client.query(
-            `UPDATE inventory_batches 
-             SET status = CASE 
-               WHEN (SELECT COALESCE(SUM(quantity_allocated), 0) FROM salesperson_allocations WHERE production_id = $1 AND status = 'active') >= quantity 
-               THEN 'allocated' 
-               ELSE 'available' 
-             END
-             WHERE production_id = $1`,
-            [prodId]
-          );
-        }
-        
-        results.push(allocationResult.rows[0]);
+      const inventoryItem = inventoryResult.rows[0];
+      const availableStock = parseFloat(inventoryItem.quantity || 0);
+      const qty = parseFloat(quantity);
+      
+      if (qty > availableStock) {
+        throw new Error(`Insufficient stock for ${inventoryItem.product_name}. Available: ${availableStock.toFixed(2)}, Requested: ${qty.toFixed(2)}`);
+      }
+      
+      // Reduce inventory stock
+      await client.query(
+        `UPDATE inventory_items 
+         SET quantity = GREATEST(0, quantity - $1),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [qty, invItemId]
+      );
+      
+      // Create allocation record (no production_id or batch_number - sourced directly from inventory)
+      const allocationResult = await client.query(
+        `INSERT INTO salesperson_allocations (product_id, salesperson_id, quantity_allocated, allocation_date, notes, allocated_by)
+         VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
+         RETURNING *`,
+        [prodProdId, salesId, qty, notes || null, userId]
+      );
+      
+      results.push(allocationResult.rows[0]);
       }
       
       await client.query('COMMIT');
-      
-      // Calculate remaining stock and store in inventory (only if inventory_batches exists)
-      if (inventoryBatchesExists) {
-        await updateRemainingStock(client, allocations);
-      }
       
       res.status(201).json({ 
         success: true, 
@@ -807,318 +480,70 @@ export const createSalesAllocation = async (req, res, next) => {
       });
     } else {
       // Single allocation mode
-      if ((!productionId && !inventoryItemId) || !productId || !salespersonId || !quantityAllocated || quantityAllocated <= 0) {
+      if (!inventoryItemId || !productId || !salespersonId || !quantityAllocated || quantityAllocated <= 0) {
         return res.status(400).json({ 
           success: false, 
-          message: 'Production ID or Inventory Item ID, Product ID, Salesperson ID, and quantity are required' 
+          message: 'Inventory Item ID, Product ID, Salesperson ID, and quantity are required' 
         });
       }
       
       await client.query('BEGIN');
       
-      let production;
-      let actualProductionId = productionId;
-      let batchNumber;
       const qty = parseFloat(quantityAllocated);
       
-      if (inventoryItemId) {
-        // Check if we can allocate from inventory (requires inventory_batches table)
-        if (!inventoryBatchesExists) {
-          await client.query('ROLLBACK');
-          client.release();
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Allocating from inventory stock requires inventory_batches table. Please run database migrations first.' 
-          });
-        }
-        
-        // Allocating from inventory stock - find the oldest available batch
-        const batchResult = await client.query(
-          `SELECT ib.production_id, ib.batch_number, ib.quantity, p.batch as prod_batch, pr.name as product_name
-           FROM inventory_batches ib
-           JOIN inventory_items i ON ib.inventory_item_id = i.id
-           JOIN productions p ON ib.production_id = p.id
-           JOIN products pr ON p.product_id = pr.id
-           WHERE i.id = $1 
-             AND ib.status = 'available'
-             AND ib.quantity > 0
-           ORDER BY ib.production_date ASC, ib.created_at ASC
-           LIMIT 1`,
-          [inventoryItemId]
-        );
-        
-        if (batchResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ 
-            success: false, 
-            message: 'No available inventory batches found for this item' 
-          });
-        }
-        
-        const batch = batchResult.rows[0];
-        actualProductionId = batch.production_id;
-        batchNumber = batch.batch_number || batch.prod_batch;
-        
-        // Get production details - check if batch column exists
-        const batchColCheck2 = await pool.query(`
-          SELECT EXISTS (
-            SELECT FROM information_schema.columns 
-            WHERE table_name = 'productions' AND column_name = 'batch'
-          )
-        `);
-        const hasBatchCol2 = batchColCheck2.rows[0].exists;
-        const batchSelect2 = hasBatchCol2 ? 'p.batch' : 'NULL';
-        
-        const productionResult = await client.query(
-          `SELECT p.*, pr.name as product_name, ${batchSelect2} as batch
-           FROM productions p
-           JOIN products pr ON p.product_id = pr.id
-           WHERE p.id = $1`,
-          [actualProductionId]
-        );
-        
-        if (productionResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return res.status(404).json({ success: false, message: 'Production not found' });
-        }
-        
-        production = productionResult.rows[0];
-        
-        // Verify product matches
-        const itemResult = await client.query(
-          `SELECT i.*, pr.id as product_id
-           FROM inventory_items i
-           JOIN products pr ON i.name = pr.name
-           WHERE i.id = $1 AND pr.id = $2
-           LIMIT 1`,
-          [inventoryItemId, productId]
-        );
-        
-        if (itemResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ 
-            success: false, 
-            message: 'Inventory item does not match the selected product' 
-          });
-        }
-        
-        // Check available inventory stock (only if inventory_batches exists)
-        const inventoryStockResult = await client.query(
-          `SELECT COALESCE(SUM(quantity), 0) as available_stock
-           FROM inventory_batches
-           WHERE inventory_item_id = $1 AND status = 'available'`,
-          [inventoryItemId]
-        );
-        
-        const availableStock = parseFloat(inventoryStockResult.rows[0]?.available_stock || 0);
-        
-        if (qty > availableStock) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ 
-            success: false, 
-            message: `Insufficient inventory stock. Available: ${availableStock.toFixed(2)}, Requested: ${qty.toFixed(2)}` 
-          });
-        }
-        
-        // Reduce inventory batches (FIFO - oldest first) - table already checked exists above
-        let remainingToAllocate = qty;
-        const batchesToReduce = await client.query(
-          `SELECT id, quantity, production_id, batch_number
-           FROM inventory_batches
-           WHERE inventory_item_id = $1 
-             AND status = 'available'
-             AND quantity > 0
-           ORDER BY production_date ASC, created_at ASC`,
-          [inventoryItemId]
-        );
-        
-        for (const batch of batchesToReduce.rows) {
-          if (remainingToAllocate <= 0) break;
-          
-          const batchQty = parseFloat(batch.quantity);
-          const toReduce = Math.min(remainingToAllocate, batchQty);
-          const newQuantity = batchQty - toReduce;
-          
-          if (newQuantity <= 0) {
-            // Delete batch if quantity would become 0 (constraint requires quantity > 0)
-            await client.query(
-              `DELETE FROM inventory_batches WHERE id = $1`,
-              [batch.id]
-            );
-          } else {
-            // Update batch with new quantity
-            await client.query(
-              `UPDATE inventory_batches
-               SET quantity = $1,
-                   updated_at = CURRENT_TIMESTAMP
-               WHERE id = $2`,
-              [newQuantity, batch.id]
-            );
-          }
-          
-          remainingToAllocate -= toReduce;
-        }
-        
-        // Reduce inventory item quantity
-        await client.query(
-          `UPDATE inventory_items 
-           SET quantity = GREATEST(0, quantity - $1),
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = $2`,
-          [qty, inventoryItemId]
-        );
-        
-      } else {
-        // Allocating from production
-        // Check if batch column exists
-        const batchColCheck3 = await pool.query(`
-          SELECT EXISTS (
-            SELECT FROM information_schema.columns 
-            WHERE table_name = 'productions' AND column_name = 'batch'
-          )
-        `);
-        const hasBatchCol3 = batchColCheck3.rows[0].exists;
-        const batchSelect3 = hasBatchCol3 ? 'p.batch' : 'NULL';
-        
-        const productionResult = await client.query(
-          `SELECT p.*, pr.name as product_name, ${batchSelect3} as batch
-           FROM productions p
-           JOIN products pr ON p.product_id = pr.id
-           WHERE p.id = $1`,
-          [productionId]
-        );
-        
-        if (productionResult.rows.length === 0) {
-          await client.query('ROLLBACK');
-          return res.status(404).json({ success: false, message: 'Production not found' });
-        }
-        
-        production = productionResult.rows[0];
-        batchNumber = production.batch || (production.date ? `${production.date}-001` : `${new Date().toISOString().split('T')[0]}-001`);
-        
-        // Get already allocated quantity
-        const allocatedResult = await client.query(
-          `SELECT COALESCE(SUM(quantity_allocated), 0) as total_allocated
-           FROM salesperson_allocations
-           WHERE production_id = $1 AND status = 'active'`,
-          [productionId]
-        );
-        
-        const alreadyAllocated = parseFloat(allocatedResult.rows[0].total_allocated || 0);
-        
-        // Get available inventory stock for this product (from previous days' remaining allocations)
-        const inventoryResult = await client.query(
-          `SELECT COALESCE(i.quantity, 0) as inventory_stock
-           FROM inventory_items i
-           JOIN inventory_categories c ON i.category_id = c.id
-           WHERE i.name = $1 AND c.name = 'Finished Goods'
-           LIMIT 1`,
-          [production.product_name]
-        );
-        
-        const inventoryStock = parseFloat(inventoryResult.rows[0]?.inventory_stock || 0);
-        
-        // Available = Today's production remaining + Inventory stock from previous days
-        const totalProduced = parseFloat(production.quantity_produced);
-        const productionAvailable = totalProduced - alreadyAllocated;
-        const totalAvailable = productionAvailable + inventoryStock;
-        
-        if (qty > totalAvailable) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ 
-            success: false, 
-            message: `Insufficient quantity. Available: ${totalAvailable.toFixed(2)} (Production: ${productionAvailable.toFixed(2)}, Inventory: ${inventoryStock.toFixed(2)}), Requested: ${qty}` 
-          });
-        }
-        
-        // If allocating from inventory, reduce inventory first
-        let remainingToAllocate = qty;
-        if (inventoryStock > 0 && productionAvailable < qty) {
-          const fromInventory = Math.min(inventoryStock, qty - productionAvailable);
-          remainingToAllocate = qty - fromInventory;
-          
-          // Reduce inventory
-          await client.query(
-            `UPDATE inventory_items 
-             SET quantity = GREATEST(0, quantity - $1),
-                 updated_at = CURRENT_TIMESTAMP
-             WHERE id = (SELECT i.id FROM inventory_items i
-                         JOIN inventory_categories c ON i.category_id = c.id
-                         WHERE i.name = $2 AND c.name = 'Finished Goods'
-                         LIMIT 1)`,
-            [fromInventory, production.product_name]
-          );
-          
-          // Update inventory batches (reduce from available batches)
-          // First get the batch to update
-          const batchToUpdateResult = await client.query(
-            `SELECT ib.id, ib.quantity
-             FROM inventory_batches ib
-             JOIN inventory_items i ON ib.inventory_item_id = i.id
-             JOIN inventory_categories c ON i.category_id = c.id
-             WHERE i.name = $1 AND c.name = 'Finished Goods'
-               AND ib.status = 'available'
-               AND ib.quantity > 0
-             ORDER BY ib.production_date ASC
-             LIMIT 1`,
-            [production.product_name]
-          );
-          
-          if (batchToUpdateResult.rows.length > 0) {
-            const batch = batchToUpdateResult.rows[0];
-            const newQuantity = parseFloat(batch.quantity) - fromInventory;
-            
-            if (newQuantity <= 0) {
-              // Delete batch if quantity would become 0 (constraint requires quantity > 0)
-              await client.query(`DELETE FROM inventory_batches WHERE id = $1`, [batch.id]);
-            } else {
-              // Update batch with new quantity
-              await client.query(
-                `UPDATE inventory_batches
-                 SET quantity = $1, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = $2`,
-                [newQuantity, batch.id]
-              );
-            }
-          }
-        }
-      }
-      
-      // Create allocation record
-      // Ensure batchNumber has a value (should already be set above, but add fallback)
-      const finalBatchNumber = batchNumber || (production.date ? `${production.date}-001` : `${new Date().toISOString().split('T')[0]}-001`);
-      const result = await client.query(
-        `INSERT INTO salesperson_allocations (production_id, product_id, salesperson_id, batch_number, quantity_allocated, allocation_date, notes, allocated_by)
-         VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7)
-         RETURNING *`,
-        [actualProductionId, productId, salespersonId, finalBatchNumber, qty, notes || null, userId]
+      // Get inventory item and verify it matches the product
+      const inventoryResult = await client.query(
+        `SELECT i.*, pr.name as product_name, pr.id as product_id
+         FROM inventory_items i
+         JOIN inventory_categories c ON i.category_id = c.id
+         JOIN products pr ON i.name = pr.name
+         WHERE i.id = $1 AND pr.id = $2 AND c.name = 'Finished Goods'
+         LIMIT 1`,
+        [inventoryItemId, productId]
       );
       
-      // Update inventory batch status (if allocating from production) - only if table exists
-      if (!inventoryItemId && inventoryBatchesExists) {
-        await client.query(
-          `UPDATE inventory_batches 
-           SET status = CASE 
-             WHEN (SELECT COALESCE(SUM(quantity_allocated), 0) FROM salesperson_allocations WHERE production_id = $1 AND status = 'active') >= quantity 
-             THEN 'allocated' 
-             ELSE 'available' 
-           END
-           WHERE production_id = $1`,
-          [actualProductionId]
-        );
+      if (inventoryResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Inventory item not found or does not match the selected product' 
+        });
       }
+      
+      const inventoryItem = inventoryResult.rows[0];
+      const availableStock = parseFloat(inventoryItem.quantity || 0);
+      
+      if (qty > availableStock) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          success: false, 
+          message: `Insufficient inventory stock. Available: ${availableStock.toFixed(2)}, Requested: ${qty.toFixed(2)}` 
+        });
+      }
+      
+      // Reduce inventory stock directly
+      await client.query(
+        `UPDATE inventory_items 
+         SET quantity = GREATEST(0, quantity - $1),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [qty, inventoryItemId]
+      );
+      
+      // Create allocation record (no production_id or batch_number - sourced directly from inventory)
+      const allocationResult = await client.query(
+        `INSERT INTO salesperson_allocations (product_id, salesperson_id, quantity_allocated, allocation_date, notes, allocated_by)
+         VALUES ($1, $2, $3, CURRENT_DATE, $4, $5)
+         RETURNING *`,
+        [productId, salespersonId, qty, notes || null, userId]
+      );
       
       await client.query('COMMIT');
       
-      // Update remaining stock (if allocating from production and inventory_batches exists)
-      if (!inventoryItemId && inventoryBatchesExists) {
-        await updateRemainingStock(client, [{ productionId: actualProductionId, productId, quantity: qty }]);
-      }
-      
       res.status(201).json({ 
         success: true, 
-        data: result.rows[0],
-        message: 'Salesperson allocation created successfully' 
+        data: allocationResult.rows[0],
+        message: 'Allocation created successfully' 
       });
     }
   } catch (error) {
@@ -1133,37 +558,15 @@ export const createSalesAllocation = async (req, res, next) => {
 // Helper function to update remaining stock in inventory
 async function updateRemainingStock(client, allocations) {
   try {
-    // Check if inventory_batches table exists
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'inventory_batches'
-      )
-    `);
-    
-    if (!tableCheck.rows[0].exists) {
-      // Table doesn't exist, skip batch updates
-      return;
-    }
-    
     // Track which products need inventory recalculation
     const productsToUpdate = new Set();
     
     for (const allocation of allocations) {
       const { productionId, productId } = allocation;
       
-      // Get production details - check if batch column exists
-      const batchColCheck = await pool.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.columns 
-          WHERE table_name = 'productions' AND column_name = 'batch'
-        )
-      `);
-      const hasBatchCol = batchColCheck.rows[0].exists;
-      const batchSelect = hasBatchCol ? 'p.batch' : 'NULL';
-      
+      // Get production details
       const prodResult = await client.query(
-        `SELECT p.quantity_produced, ${batchSelect} as batch, pr.name as product_name
+        `SELECT p.quantity_produced, p.batch, pr.name as product_name
          FROM productions p
          JOIN products pr ON p.product_id = pr.id
          WHERE p.id = $1`,
@@ -1199,7 +602,7 @@ async function updateRemainingStock(client, allocations) {
         const itemId = itemResult.rows[0].id;
         productsToUpdate.add(itemId);
         
-        if (remaining > 0 && production.batch) {
+        if (remaining > 0) {
           // Update or create inventory batch for remaining stock
           await client.query(
             `INSERT INTO inventory_batches (inventory_item_id, production_id, batch_number, quantity, production_date, status)
@@ -1209,7 +612,7 @@ async function updateRemainingStock(client, allocations) {
                  status = 'available'`,
             [itemId, productionId, production.batch, remaining]
           );
-        } else if (remaining <= 0 && production.batch) {
+        } else {
           // If all allocated, mark batch as allocated
           await client.query(
             `UPDATE inventory_batches 
@@ -1249,95 +652,40 @@ async function updateRemainingStock(client, allocations) {
 // Get salesperson allocations
 export const getSalesAllocations = async (req, res, next) => {
   try {
-    // Check if salesperson_allocations table exists
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'salesperson_allocations'
-      )
-    `);
-    
-    if (!tableCheck.rows[0].exists) {
-      // Table doesn't exist - return empty array (migration not run yet)
-      return res.json({ success: true, data: [] });
-    }
-    
     const { date, status, salespersonId } = req.query;
-    
-    // Check which columns exist in salesperson_allocations table
-    const columnsCheck = await pool.query(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'salesperson_allocations'
-    `);
-    const existingColumns = columnsCheck.rows.map(r => r.column_name);
-    
-    // Check if batch column exists in productions table
-    const batchColCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.columns 
-        WHERE table_name = 'productions' AND column_name = 'batch'
-      )
-    `);
-    const hasBatchColumn = batchColCheck.rows[0].exists;
-    const batchSelect = hasBatchColumn ? 'pr.batch' : 'NULL';
-    
-    // Build SELECT with only existing columns
-    const saColumns = [
-      'id', 'production_id', 'product_id', 'salesperson_id', 
-      'batch_number', 'quantity_allocated', 'allocation_date',
-      'status', 'notes', 'allocated_by', 'created_at', 'updated_at'
-    ].filter(col => existingColumns.includes(col))
-     .map(col => `sa.${col}`)
-     .join(', ');
     
     let query = `
       SELECT 
-        ${saColumns},
+        sa.*,
         p.name as product_name,
-        pr.date as production_date,
-        ${batchSelect} as production_batch,
         u.name as salesperson_name,
         allocator.name as allocated_by_name
       FROM salesperson_allocations sa
       JOIN products p ON sa.product_id = p.id
-      JOIN productions pr ON sa.production_id = pr.id
       JOIN users u ON sa.salesperson_id = u.id
       LEFT JOIN users allocator ON sa.allocated_by = allocator.id
       WHERE 1=1
     `;
     
     const params = [];
-    if (date && existingColumns.includes('allocation_date')) {
+    if (date) {
       params.push(date);
       query += ` AND sa.allocation_date = $${params.length}`;
     }
-    if (status && existingColumns.includes('status')) {
+    if (status) {
       params.push(status);
       query += ` AND sa.status = $${params.length}`;
     }
-    if (salespersonId && existingColumns.includes('salesperson_id')) {
+    if (salespersonId) {
       params.push(salespersonId);
       query += ` AND sa.salesperson_id = $${params.length}`;
     }
     
-    if (existingColumns.includes('allocation_date') && existingColumns.includes('created_at')) {
-      query += ' ORDER BY sa.allocation_date DESC, sa.created_at DESC';
-    } else if (existingColumns.includes('created_at')) {
-      query += ' ORDER BY sa.created_at DESC';
-    } else if (existingColumns.includes('allocation_date')) {
-      query += ' ORDER BY sa.allocation_date DESC';
-    }
+    query += ' ORDER BY sa.allocation_date DESC, sa.created_at DESC';
     
     const result = await pool.query(query, params);
     res.json({ success: true, data: result.rows });
   } catch (error) {
-    console.error('Error getting sales allocations:', error);
-    // If query fails, try to return empty array instead of error
-    if (error.code === '42703' || error.code === '42601' || error.message.includes('does not exist') || error.message.includes('syntax error')) {
-      console.warn('Schema mismatch or syntax error in salesperson_allocations query, returning empty array');
-      return res.json({ success: true, data: [] });
-    }
     next(error);
   }
 };
@@ -1352,19 +700,6 @@ export const getSalespersonInventory = async (req, res, next) => {
         success: false,
         message: 'Unauthorized: Salesperson ID not found'
       });
-    }
-
-    // Check if salesperson_allocations table exists
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'salesperson_allocations'
-      )
-    `);
-    
-    if (!tableCheck.rows[0].exists) {
-      // Table doesn't exist - return empty array
-      return res.json({ success: true, data: [] });
     }
 
     // Get all active allocations for this salesperson, grouped by product
@@ -1403,94 +738,28 @@ export const getSalespersonInventory = async (req, res, next) => {
 // Get today's production with allocation summary
 export const getTodayProductionWithAllocations = async (req, res, next) => {
   try {
-    // Check if salesperson_allocations table exists
-    const tableCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_name = 'salesperson_allocations'
-      )
-    `);
-    
     const today = new Date().toISOString().split('T')[0];
-    
-    // If table doesn't exist, return production without allocations
-    if (!tableCheck.rows[0].exists) {
-      // Check if batch column exists
-      const batchColumnCheck = await pool.query(`
-        SELECT EXISTS (
-          SELECT FROM information_schema.columns 
-          WHERE table_name = 'productions' AND column_name = 'batch'
-        )
-      `);
-      
-      const hasBatchCol = batchColumnCheck.rows[0].exists;
-      const batchSelect = hasBatchCol ? 'p.batch' : 'NULL';
-      
-      const result = await pool.query(`
-        SELECT 
-          p.id as production_id,
-          p.date as production_date,
-          ${batchSelect} as batch,
-          p.quantity_produced,
-          p.notes,
-          pr.id as product_id,
-          pr.name as product_name,
-          pr.category as product_category,
-          0 as total_allocated,
-          p.quantity_produced as remaining_quantity,
-          0 as salesperson_count,
-          '[]'::json as allocations
-        FROM productions p
-        JOIN products pr ON p.product_id = pr.id
-        WHERE p.date = $1
-        ORDER BY pr.name, p.created_at DESC
-      `, [today]);
-      return res.json({ success: true, data: result.rows });
-    }
-    
-    // Check if batch column exists
-    const batchColumnCheck = await pool.query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.columns 
-        WHERE table_name = 'productions' AND column_name = 'batch'
-      )
-    `);
-    
-    const hasBatchColumn = batchColumnCheck.rows[0].exists;
-    
-    // Build query based on whether batch column exists
-    const batchSelect = hasBatchColumn ? 'p.batch' : 'NULL';
-    const batchGroupBy = hasBatchColumn ? 'p.batch,' : '';
     
     const result = await pool.query(`
       SELECT 
         p.id as production_id,
         p.date as production_date,
-        ${batchSelect} as batch,
         p.quantity_produced,
         p.notes,
         pr.id as product_id,
         pr.name as product_name,
         pr.category as product_category,
-        COALESCE(SUM(CASE WHEN sa.status = 'active' THEN sa.quantity_allocated ELSE 0 END), 0) as total_allocated,
-        (p.quantity_produced - COALESCE(SUM(CASE WHEN sa.status = 'active' THEN sa.quantity_allocated ELSE 0 END), 0)) as remaining_quantity,
-        COUNT(DISTINCT CASE WHEN sa.status = 'active' THEN sa.salesperson_id END) as salesperson_count,
-        json_agg(
-          json_build_object(
-            'allocation_id', sa.id,
-            'salesperson_id', sa.salesperson_id,
-            'salesperson_name', u.name,
-            'quantity_allocated', sa.quantity_allocated,
-            'allocation_date', sa.allocation_date,
-            'status', sa.status
-          ) ORDER BY sa.created_at
-        ) FILTER (WHERE sa.id IS NOT NULL) as allocations
+        -- Get current inventory stock for this product (from finished goods)
+        COALESCE((
+          SELECT i.quantity
+          FROM inventory_items i
+          JOIN inventory_categories c ON i.category_id = c.id
+          WHERE i.name = pr.name AND c.name = 'Finished Goods'
+          LIMIT 1
+        ), 0) as current_inventory_stock
       FROM productions p
       JOIN products pr ON p.product_id = pr.id
-      LEFT JOIN salesperson_allocations sa ON p.id = sa.production_id
-      LEFT JOIN users u ON sa.salesperson_id = u.id
       WHERE p.date = $1
-      GROUP BY p.id, p.date, ${batchGroupBy} p.quantity_produced, p.notes, pr.id, pr.name, pr.category
       ORDER BY pr.name, p.created_at DESC
     `, [today]);
     

@@ -120,53 +120,127 @@ export const createReturn = async (req, res, next) => {
         );
         returnRecords.push(result.rows[0]);
         
-        // Add returned items back to salesperson's allocation
+        // Handle return settlement: if settled, deduct from allocation and create return batch
+        // If pending/partial, add back to allocation (for potential resale)
         if (returnQuantity > 0) {
-          // Check if there's an active allocation for this product
-          const existingAllocationResult = await client.query(`
-            SELECT id, quantity_allocated, batch_number, production_id
-            FROM salesperson_allocations
-            WHERE salesperson_id = $1 
-            AND product_id = $2 
-            AND status = 'active'
-            ORDER BY allocation_date ASC, created_at ASC
-            LIMIT 1
-          `, [salespersonId, productId]);
+          const isSettled = settlementStatus === 'settled';
           
-          if (existingAllocationResult.rows.length > 0) {
-            // Update existing allocation
-            await client.query(`
-              UPDATE salesperson_allocations
-              SET quantity_allocated = quantity_allocated + $1,
-                  status = 'active'
-              WHERE id = $2
-            `, [returnQuantity, existingAllocationResult.rows[0].id]);
-          } else {
-            // Find the most recent production for this product to link allocation
-            const productionResult = await client.query(`
-              SELECT id, date, batch
-              FROM productions
-              WHERE product_id = $1
-              ORDER BY date DESC, created_at DESC
+          if (isSettled) {
+            // SETTLED RETURNS: Deduct from allocation and create return batch (100% free)
+            // Deduct from active allocations using FIFO
+            let remainingToDeduct = returnQuantity;
+            const allocationsResult = await client.query(`
+              SELECT id, quantity_allocated
+              FROM salesperson_allocations
+              WHERE salesperson_id = $1 
+                AND product_id = $2 
+                AND status = 'active'
+                AND (batch_number IS NULL OR batch_number NOT LIKE 'RET-%')
+              ORDER BY allocation_date ASC, created_at ASC
+              FOR UPDATE
+            `, [salespersonId, productId]);
+            
+            for (const allocation of allocationsResult.rows) {
+              if (remainingToDeduct <= 0) break;
+              
+              const allocQty = parseFloat(allocation.quantity_allocated || 0);
+              const toDeduct = Math.min(remainingToDeduct, allocQty);
+              
+              if (toDeduct >= allocQty) {
+                // Fully deducted, mark as completed
+                await client.query(`
+                  UPDATE salesperson_allocations
+                  SET status = 'completed', updated_at = CURRENT_TIMESTAMP
+                  WHERE id = $1
+                `, [allocation.id]);
+              } else {
+                // Partially deducted
+                await client.query(`
+                  UPDATE salesperson_allocations
+                  SET quantity_allocated = quantity_allocated - $1,
+                      updated_at = CURRENT_TIMESTAMP
+                  WHERE id = $2
+                `, [toDeduct, allocation.id]);
+              }
+              
+              remainingToDeduct -= toDeduct;
+            }
+            
+            // Create return batch allocation (100% free, marked with RET- prefix)
+            const returnBatchNumber = `RET-${new Date().toISOString().split('T')[0]}`;
+            
+            // Get product info to find inventory item for production_id
+            const productResult = await client.query(`
+              SELECT p.id as product_id, i.id as inventory_item_id
+              FROM products p
+              LEFT JOIN inventory_items i ON i.name = p.name
+              LEFT JOIN inventory_categories c ON i.category_id = c.id
+              WHERE p.id = $1 AND (c.name = 'Finished Goods' OR i.id IS NULL)
               LIMIT 1
             `, [productId]);
             
-            if (productionResult.rows.length > 0) {
-              const production = productionResult.rows[0];
-              // Create new allocation linked to the production
+            // Create return batch allocation (use NULL for production_id since it's a return batch)
+            await client.query(`
+              INSERT INTO salesperson_allocations (
+                production_id, product_id, salesperson_id, batch_number, 
+                quantity_allocated, allocation_date, status, notes
+              )
+              VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, 'active', 'Return Settlement - 100% Free')
+            `, [
+              null, // production_id is NULL for return batches
+              productId,
+              salespersonId,
+              returnBatchNumber,
+              returnQuantity
+            ]);
+          } else {
+            // PENDING/PARTIAL RETURNS: Add back to allocation (for potential resale)
+            const existingAllocationResult = await client.query(`
+              SELECT id, quantity_allocated, batch_number, production_id
+              FROM salesperson_allocations
+              WHERE salesperson_id = $1 
+                AND product_id = $2 
+                AND status = 'active'
+                AND (batch_number IS NULL OR batch_number NOT LIKE 'RET-%')
+              ORDER BY allocation_date ASC, created_at ASC
+              LIMIT 1
+            `, [salespersonId, productId]);
+            
+            if (existingAllocationResult.rows.length > 0) {
+              // Update existing allocation
               await client.query(`
-                INSERT INTO salesperson_allocations (
-                  production_id, product_id, salesperson_id, batch_number, 
-                  quantity_allocated, allocation_date, status
-                )
-                VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, 'active')
-              `, [
-                production.id,
-                productId,
-                salespersonId,
-                production.batch || `RET-${new Date().toISOString().split('T')[0]}`,
-                returnQuantity
-              ]);
+                UPDATE salesperson_allocations
+                SET quantity_allocated = quantity_allocated + $1,
+                    status = 'active',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $2
+              `, [returnQuantity, existingAllocationResult.rows[0].id]);
+            } else {
+              // Find the most recent production for this product to link allocation
+              const productionResult = await client.query(`
+                SELECT id, date
+                FROM productions
+                WHERE product_id = $1
+                ORDER BY date DESC, created_at DESC
+                LIMIT 1
+              `, [productId]);
+              
+              if (productionResult.rows.length > 0) {
+                const production = productionResult.rows[0];
+                // Create new allocation linked to the production
+                await client.query(`
+                  INSERT INTO salesperson_allocations (
+                    production_id, product_id, salesperson_id, batch_number, 
+                    quantity_allocated, allocation_date, status
+                  )
+                  VALUES ($1, $2, $3, NULL, $4, CURRENT_DATE, 'active')
+                `, [
+                  production.id,
+                  productId,
+                  salespersonId,
+                  returnQuantity
+                ]);
+              }
             }
           }
         }

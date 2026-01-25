@@ -113,7 +113,31 @@ export const getAllInventory = async (req, res, next) => {
           WHEN LOWER(c.name) = 'finished goods' THEN 'finished_product'
           WHEN LOWER(c.name) = 'utilities' THEN 'utilities'
           ELSE LOWER(REPLACE(c.name, ' ', '_'))
-        END as category
+        END as category,
+        -- Calculate total usage: production usage + stock adjustments (out) + allocations (for finished goods)
+        COALESCE((
+          -- Usage in production (from product BOM)
+          SELECT SUM(
+            CASE 
+              WHEN pb.unit = i.unit THEN p.quantity_produced * pb.quantity_required
+              WHEN pb.unit = 'ml' AND i.unit = 'liter' THEN p.quantity_produced * pb.quantity_required / 1000.0
+              WHEN pb.unit = 'liter' AND i.unit = 'ml' THEN p.quantity_produced * pb.quantity_required * 1000.0
+              WHEN pb.unit = 'g' AND i.unit = 'kg' THEN p.quantity_produced * pb.quantity_required / 1000.0
+              WHEN pb.unit = 'kg' AND i.unit = 'g' THEN p.quantity_produced * pb.quantity_required * 1000.0
+              ELSE p.quantity_produced * pb.quantity_required
+            END
+          )
+          FROM productions p
+          JOIN product_bom pb ON p.product_id = pb.product_id
+          WHERE pb.inventory_item_id = i.id
+        ), 0) +
+        COALESCE((
+          -- Allocations to salespersons (for finished goods)
+          SELECT SUM(sa.quantity_allocated)
+          FROM salesperson_allocations sa
+          JOIN products pr ON sa.product_id = pr.id
+          WHERE pr.name = i.name AND sa.status IN ('active', 'completed')
+        ), 0) as total_usage
       FROM inventory_items i
       LEFT JOIN inventory_categories c ON i.category_id = c.id
       WHERE 1=1

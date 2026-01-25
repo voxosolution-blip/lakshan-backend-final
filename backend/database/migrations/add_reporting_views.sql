@@ -56,6 +56,8 @@ SELECT
   s.date,
   s.salesperson_id,
   u.name AS salesperson_name,
+  u.role AS salesperson_role,
+  COALESCE(s.sold_by, CASE WHEN u.role = 'ADMIN' THEN 'ADMIN' ELSE 'SALESPERSON' END) AS sold_by,
   s.buyer_id,
   b.shop_name AS customer_name,
   s.payment_status,

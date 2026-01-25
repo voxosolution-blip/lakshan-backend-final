@@ -5,33 +5,16 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// Railway provides DATABASE_URL automatically, but we can also use individual variables
-let poolConfig;
-
-if (process.env.DATABASE_URL) {
-  // Use DATABASE_URL if provided (Railway, Heroku, etc.)
-  poolConfig = {
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-  };
-} else {
-  // Use individual environment variables or defaults (for local development)
-  poolConfig = {
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5435', 10),
-    database: process.env.DB_NAME || 'yogurt_erp',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-  };
-}
-
-const pool = new Pool(poolConfig);
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT || 5435,
+  database: process.env.DB_NAME || 'yogurt_erp',
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
 
 // Test connection
 pool.on('connect', () => {

@@ -187,4 +187,224 @@ export const resetSystem = withMaintenanceLock(async (req, res, next) => {
   }
 });
 
+// ============================================
+// END OF DAY STOCK APPROVAL
+// ============================================
+
+import pool from '../config/db.js';
+
+// Get all pending end-of-day requests
+export const getPendingEndOfDayRequests = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+        r.id,
+        r.request_date,
+        r.status,
+        r.created_at,
+        u.id as salesperson_id,
+        u.name as salesperson_name,
+        u.username as salesperson_username,
+        COUNT(i.id) as items_count,
+        SUM(i.remaining_quantity) as total_quantity
+       FROM end_of_day_stock_requests r
+       JOIN users u ON r.salesperson_id = u.id
+       LEFT JOIN end_of_day_stock_items i ON r.id = i.request_id
+       WHERE r.status = 'pending'
+       GROUP BY r.id, r.request_date, r.status, r.created_at, u.id, u.name, u.username
+       ORDER BY r.request_date DESC, r.created_at DESC`
+    );
+    
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Get end-of-day request details (admin)
+export const getEndOfDayRequestDetailsAdmin = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    const requestResult = await pool.query(
+      `SELECT r.*, u.name as salesperson_name, u.username as salesperson_username
+       FROM end_of_day_stock_requests r
+       JOIN users u ON r.salesperson_id = u.id
+       WHERE r.id = $1`,
+      [id]
+    );
+    
+    if (requestResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found'
+      });
+    }
+    
+    const itemsResult = await pool.query(
+      `SELECT * FROM end_of_day_stock_items WHERE request_id = $1 ORDER BY product_name`,
+      [id]
+    );
+    
+    res.json({
+      success: true,
+      data: {
+        ...requestResult.rows[0],
+        items: itemsResult.rows
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Approve end-of-day request
+export const approveEndOfDayRequest = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const adminId = req.user.userId;
+    const { notes } = req.body || {};
+    
+    await client.query('BEGIN');
+    
+    // Get request
+    const requestResult = await client.query(
+      `SELECT * FROM end_of_day_stock_requests WHERE id = $1 AND status = 'pending' FOR UPDATE`,
+      [id]
+    );
+    
+    if (requestResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found or already processed'
+      });
+    }
+    
+    const request = requestResult.rows[0];
+    
+    // Get items
+    const itemsResult = await client.query(
+      `SELECT * FROM end_of_day_stock_items WHERE request_id = $1`,
+      [id]
+    );
+    
+    // Update inventory for each item
+    for (const item of itemsResult.rows) {
+      // Find finished goods inventory item
+      const invResult = await client.query(
+        `SELECT i.id 
+         FROM inventory_items i
+         JOIN inventory_categories c ON i.category_id = c.id
+         WHERE i.name = $1 AND c.name = 'Finished Goods'
+         LIMIT 1`,
+        [item.product_name]
+      );
+      
+      if (invResult.rows.length > 0) {
+        const invId = invResult.rows[0].id;
+        const remainingQty = parseFloat(item.remaining_quantity || 0);
+        
+        // Add to inventory
+        await client.query(
+          `UPDATE inventory_items 
+           SET quantity = quantity + $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2`,
+          [remainingQty, invId]
+        );
+        
+        // Create inventory batch entry
+        const batchNumber = `EOD-${request.request_date.replace(/-/g, '')}-${request.salesperson_id.substring(0, 8)}`;
+        await client.query(
+          `INSERT INTO inventory_batches (
+            inventory_item_id, production_id, batch_number, quantity, 
+            production_date, status
+          )
+          VALUES ($1, NULL, $2, $3, $4, 'available')
+          ON CONFLICT (inventory_item_id, batch_number) 
+          DO UPDATE SET
+            quantity = inventory_batches.quantity + EXCLUDED.quantity,
+            status = 'available',
+            updated_at = CURRENT_TIMESTAMP`,
+          [invId, batchNumber, remainingQty, request.request_date]
+        );
+      }
+    }
+    
+    // Mark allocations as completed (they've been returned to inventory)
+    await client.query(
+      `UPDATE salesperson_allocations 
+       SET status = 'completed',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE salesperson_id = $1 
+         AND allocation_date = $2
+         AND status = 'active'`,
+      [request.salesperson_id, request.request_date]
+    );
+    
+    // Update request status
+    await client.query(
+      `UPDATE end_of_day_stock_requests 
+       SET status = 'approved',
+           approved_by = $1,
+           approved_at = CURRENT_TIMESTAMP,
+           notes = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3`,
+      [adminId, notes || null, id]
+    );
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      success: true,
+      message: 'End-of-day request approved and stock updated successfully'
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error approving end-of-day request:', error);
+    next(error);
+  } finally {
+    client.release();
+  }
+};
+
+// Reject end-of-day request
+export const rejectEndOfDayRequest = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.user.userId;
+    const { notes } = req.body || {};
+    
+    const result = await pool.query(
+      `UPDATE end_of_day_stock_requests 
+       SET status = 'rejected',
+           approved_by = $1,
+           approved_at = CURRENT_TIMESTAMP,
+           notes = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3 AND status = 'pending'
+       RETURNING *`,
+      [adminId, notes || null, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Request not found or already processed'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'End-of-day request rejected',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 
